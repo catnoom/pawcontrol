@@ -438,4 +438,50 @@ mod tests {
             );
         }
     }
+
+    /// The curl calibration must read an open palm as "extended".
+    ///
+    /// `Finger::extended_reference` holds per-finger constants measured from a
+    /// real hand; this pins them against an actual photograph so a change to
+    /// `Hand::scale` or the landmark decode cannot quietly decalibrate the
+    /// intensity knob.
+    #[test]
+    fn open_palm_reads_as_extended() {
+        let Ok(path) = std::env::var("PAWCONTROL_TEST_IMAGE") else {
+            eprintln!("skipping: set PAWCONTROL_TEST_IMAGE to run");
+            return;
+        };
+        let source = image::open(&path).expect("load").to_rgba8();
+        let (fw, fh) = (640u32, 480u32);
+        let tw = (fw as f32 * 0.55) as u32;
+        let th = source.height() * tw / source.width();
+        let resized =
+            image::imageops::resize(&source, tw, th, image::imageops::FilterType::Triangle);
+        let mut frame = Frame::new(fw, fh);
+        frame.rgba.fill(110);
+        let (ox, oy) = ((fw - tw) / 2, fh.saturating_sub(th) / 2);
+        for y in 0..th.min(fh - oy) {
+            for x in 0..tw {
+                let px = resized.get_pixel(x, y).0;
+                let di = (((y + oy) * fw + x + ox) * 4) as usize;
+                frame.rgba[di..di + 4].copy_from_slice(&px);
+            }
+        }
+
+        let mut tracker = HandTracker::new(TrackerConfig::default()).unwrap();
+        for _ in 0..12 {
+            let r = tracker.track(&frame, 1.0 / 30.0).unwrap();
+            if let Some(h) = r.hands.first() {
+                let curl = h.curl(crate::effect::KNOB_FINGER);
+                println!("open-palm middle curl = {curl:.3}");
+                assert!(
+                    curl < 0.3,
+                    "an open palm should rest near zero curl, got {curl:.3}; \
+                     the knob would sit off-centre at rest"
+                );
+                return;
+            }
+        }
+        panic!("no hand detected");
+    }
 }

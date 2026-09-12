@@ -94,6 +94,22 @@ impl Finger {
         }
     }
 
+    /// Fingertip-to-knuckle distance, in palm-widths, for a fully extended
+    /// finger.
+    ///
+    /// Measured from a reference hand (thumb 1.12, index 0.85, middle 0.88,
+    /// ring 0.88, pinky 0.68). Individual hands vary by roughly 10%, which the
+    /// clamp in `Hand::curl` absorbs.
+    pub fn extended_reference(self) -> f32 {
+        match self {
+            Finger::Thumb => 1.12,
+            Finger::Index => 0.85,
+            Finger::Middle => 0.88,
+            Finger::Ring => 0.88,
+            Finger::Pinky => 0.68,
+        }
+    }
+
     /// Middle joint, used to decide whether the finger is curled.
     pub fn pip(self) -> usize {
         match self {
@@ -157,6 +173,20 @@ impl Hand {
         self.tip(a).distance(self.tip(b)) / self.scale()
     }
 
+    /// How curled a finger is: 0.0 fully extended, 1.0 fully curled.
+    ///
+    /// Measured as fingertip-to-knuckle distance in palm-widths, so it is
+    /// invariant to hand rotation and to distance from the camera — unlike a
+    /// raw pixel distance, which would drift as the user moves.
+    pub fn curl(&self, finger: Finger) -> f32 {
+        let extended = finger.extended_reference();
+        // A fully curled finger brings its tip back toward its knuckle,
+        // bottoming out near 40% of the extended distance.
+        let curled = extended * 0.40;
+        let d = self.point(finger.tip()).distance(self.point(finger.mcp())) / self.scale();
+        ((extended - d) / (extended - curled)).clamp(0.0, 1.0)
+    }
+
     /// Whether a finger is extended, judged by tip-vs-knuckle distance from
     /// the wrist. Robust to hand rotation, unlike a pure y comparison.
     pub fn is_extended(&self, finger: Finger) -> bool {
@@ -196,6 +226,18 @@ pub struct HandFrame {
 impl HandFrame {
     pub fn get(&self, which: Handedness) -> Option<&Hand> {
         self.hands.iter().find(|h| h.handedness == which)
+    }
+
+    /// The strongest curl of `finger` across all tracked hands.
+    ///
+    /// Taking the maximum means either hand can drive the control, which
+    /// avoids depending on hand ordering — that is not stable across a hand
+    /// being lost and reacquired.
+    pub fn max_curl(&self, finger: Finger) -> Option<f32> {
+        self.hands
+            .iter()
+            .map(|h| h.curl(finger))
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
     }
 
     /// The two hands ordered left-to-right *on screen*, which is what region

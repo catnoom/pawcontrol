@@ -48,6 +48,8 @@ pub struct App {
     fps_counter: (u32, Instant),
     lines: Vec<LineInstance>,
     event_buf: Vec<GestureEvent>,
+    /// Effect intensity, driven by middle-finger curl while the region is up.
+    knob: f32,
 }
 
 impl App {
@@ -93,6 +95,7 @@ impl App {
             fps_counter: (0, Instant::now()),
             lines: Vec::new(),
             event_buf: Vec::new(),
+            knob: 0.0,
         })
     }
 
@@ -174,11 +177,17 @@ impl App {
 
         let region = self.region_source.region(&hands);
         let time = self.start.elapsed().as_secs_f32();
+
+        // The knob only tracks while the window is actually up, so curling a
+        // finger with no region showing leaves the setting untouched.
+        self.knob = effect::update_knob(self.knob, &hands, region.is_active());
+
         let params = {
             let ctx = EffectCtx {
                 hands: &hands,
                 region,
                 time,
+                knob: self.knob,
             };
             self.effects[self.effect_index].params(&ctx)
         };
@@ -209,10 +218,11 @@ impl App {
         if self.fps_counter.1.elapsed().as_secs_f32() >= 2.0 {
             let fps = self.fps_counter.0 as f32 / self.fps_counter.1.elapsed().as_secs_f32();
             log::info!(
-                "{fps:.0} fps | effect: {} | hands: {} | region: {}",
+                "{fps:.0} fps | effect: {} | hands: {} | region: {} | knob: {:.2}",
                 self.effects[self.effect_index].name(),
                 hands.hands.len(),
-                if region.is_active() { "on" } else { "off" }
+                if region.is_active() { "on" } else { "off" },
+                self.knob
             );
             self.fps_counter = (0, Instant::now());
         }

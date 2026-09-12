@@ -67,7 +67,7 @@ fn print_usage() {
          \x20 --help           show this message\n\n\
          CONTROLS:\n\
          \x20 thumb + pinky    cycle effect (or press space)\n\
-         \x20 thumb + index    dial the current effect's intensity\n\
+         \x20 curl middle      dial intensity (only while the window is up)\n\
          \x20 d / o / m        toggle skeleton / outline / mirror\n\
          \x20 esc              quit"
     );

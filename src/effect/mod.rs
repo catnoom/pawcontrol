@@ -7,25 +7,42 @@
 use crate::region::Region;
 use crate::tracking::hand::{Finger, HandFrame};
 
+/// The finger that drives the intensity knob.
+///
+/// Deliberately *not* index or thumb: `TwoHandQuad` builds the region from
+/// those two fingertips, so using them would make the knob and the window the
+/// same control. Middle, ring and pinky are free.
+pub const KNOB_FINGER: Finger = Finger::Middle;
+
+/// Update the intensity knob from the current hands.
+///
+/// Returns the new value, or `current` unchanged when the region is not live.
+/// Holding the value while the window is down means curling a finger between
+/// poses cannot silently move the setting: bring the window back up and the
+/// effect is exactly where you left it.
+pub fn update_knob(current: f32, hands: &HandFrame, region_active: bool) -> f32 {
+    if !region_active {
+        return current;
+    }
+    hands.max_curl(KNOB_FINGER).unwrap_or(current)
+}
+
 /// What an effect can react to when computing its parameters.
 #[allow(dead_code)] // `time` is available to effects that need animation
 pub struct EffectCtx<'a> {
     pub hands: &'a HandFrame,
     pub region: Region,
     pub time: f32,
+    /// Intensity control, 0..1: 0 with the middle finger extended, 1 fully
+    /// curled. Held steady while the region is off — see [`update_knob`].
+    pub knob: f32,
 }
 
 #[allow(dead_code)]
 impl EffectCtx<'_> {
-    /// A 0..1 control value taken from the first hand's thumb-index pinch.
-    ///
-    /// This is the generic "knob" gesture: spread the pinch to dial the
-    /// current effect up, close it to dial it down.
-    pub fn pinch_knob(&self) -> Option<f32> {
-        let hand = self.hands.hands.first()?;
-        let d = hand.pinch_distance(Finger::Thumb, Finger::Index);
-        // 0.3..1.2 palm-widths maps to the full range; outside that it clamps.
-        Some(((d - 0.3) / 0.9).clamp(0.0, 1.0))
+    /// Intensity control, 0..1. Curl the middle finger to raise it.
+    pub fn knob(&self) -> f32 {
+        self.knob.clamp(0.0, 1.0)
     }
 
     /// Diagonal of the region in normalized units, for size-aware effects.
@@ -54,9 +71,11 @@ pub struct Pixelate {
 
 impl Default for Pixelate {
     fn default() -> Self {
+        // An open hand rests at the low end, so the default pose already looks
+        // like the reference clip; curling dials it chunkier.
         Self {
-            min_block: 6.0,
-            max_block: 48.0,
+            min_block: 12.0,
+            max_block: 64.0,
         }
     }
 }
@@ -69,7 +88,7 @@ impl Effect for Pixelate {
         include_str!("../../assets/shaders/effects/pixelate.wgsl")
     }
     fn params(&self, ctx: &EffectCtx) -> [f32; 4] {
-        let k = ctx.pinch_knob().unwrap_or(0.5);
+        let k = ctx.knob();
         [self.min_block + (self.max_block - self.min_block) * k, 0.0, 0.0, 0.0]
     }
 }
@@ -80,7 +99,7 @@ pub struct Blur {
 
 impl Default for Blur {
     fn default() -> Self {
-        Self { max_radius: 6.0 }
+        Self { max_radius: 10.0 }
     }
 }
 
@@ -92,8 +111,8 @@ impl Effect for Blur {
         include_str!("../../assets/shaders/effects/blur.wgsl")
     }
     fn params(&self, ctx: &EffectCtx) -> [f32; 4] {
-        let k = ctx.pinch_knob().unwrap_or(0.5);
-        [1.0 + self.max_radius * k, 0.0, 0.0, 0.0]
+        let k = ctx.knob();
+        [2.0 + self.max_radius * k, 0.0, 0.0, 0.0]
     }
 }
 
@@ -108,8 +127,8 @@ impl Effect for RgbShift {
         include_str!("../../assets/shaders/effects/rgb_shift.wgsl")
     }
     fn params(&self, ctx: &EffectCtx) -> [f32; 4] {
-        let k = ctx.pinch_knob().unwrap_or(0.5);
-        [2.0 + 30.0 * k, 0.0, 0.0, 0.0]
+        let k = ctx.knob();
+        [3.0 + 33.0 * k, 0.0, 0.0, 0.0]
     }
 }
 
@@ -124,8 +143,8 @@ impl Effect for EdgeGlow {
         include_str!("../../assets/shaders/effects/edge_glow.wgsl")
     }
     fn params(&self, ctx: &EffectCtx) -> [f32; 4] {
-        let k = ctx.pinch_knob().unwrap_or(0.5);
-        [2.0 + 8.0 * k, 1.5, 0.0, 0.0]
+        let k = ctx.knob();
+        [3.0 + 9.0 * k, 1.5, 0.0, 0.0]
     }
 }
 
@@ -140,11 +159,11 @@ impl Effect for Swirl {
         include_str!("../../assets/shaders/effects/swirl.wgsl")
     }
     fn params(&self, ctx: &EffectCtx) -> [f32; 4] {
-        let k = ctx.pinch_knob().unwrap_or(0.5);
+        let k = ctx.knob();
         // Scale the falloff with the region so the swirl fills whatever
         // window the hands make.
         let extent = ctx.region_extent().max(0.15);
-        [0.5 + 4.0 * k, extent * 0.6, 0.0, 0.0]
+        [0.6 + 4.4 * k, extent * 0.6, 0.0, 0.0]
     }
 }
 
@@ -184,6 +203,87 @@ mod tests {
         assert_eq!(before, names.len(), "duplicate effect names: {names:?}");
     }
 
+    use crate::tracking::hand::{lm, Hand, Handedness, LANDMARK_COUNT};
+    use glam::{Vec2, Vec3};
+
+    /// A hand whose middle fingertip sits `reach` palm-widths from its knuckle.
+    fn hand_with_middle_reach(reach: f32) -> Hand {
+        let mut landmarks = [Vec3::ZERO; LANDMARK_COUNT];
+        // Palm width of 0.1: index/pinky knuckles 0.1 apart.
+        landmarks[lm::INDEX_MCP] = Vec3::new(0.5, 0.5, 0.0);
+        landmarks[lm::PINKY_MCP] = Vec3::new(0.6, 0.5, 0.0);
+        landmarks[lm::WRIST] = Vec3::new(0.55, 0.5, 0.0);
+        landmarks[lm::MIDDLE_MCP] = Vec3::new(0.55, 0.5, 0.0);
+        // Tip placed straight "up" from the knuckle.
+        landmarks[lm::MIDDLE_TIP] = Vec3::new(0.55, 0.5 - reach * 0.1, 0.0);
+        Hand {
+            landmarks,
+            handedness: Handedness::Right,
+            score: 1.0,
+        }
+    }
+
+    fn frame_with_reach(reach: f32) -> HandFrame {
+        HandFrame {
+            hands: vec![hand_with_middle_reach(reach)],
+            seq: 0,
+        }
+    }
+
+    #[test]
+    fn extended_middle_finger_reads_as_zero_curl() {
+        // 0.88 palm-widths is the measured extended reach.
+        let k = update_knob(0.5, &frame_with_reach(0.88), true);
+        assert!(k < 0.05, "extended finger should rest at zero, got {k}");
+    }
+
+    #[test]
+    fn curled_middle_finger_reads_as_full_curl() {
+        // 40% of extended is the fully-curled reference.
+        let k = update_knob(0.5, &frame_with_reach(0.88 * 0.4), true);
+        assert!(k > 0.95, "curled finger should reach one, got {k}");
+    }
+
+    #[test]
+    fn curl_is_monotonic_between_the_extremes() {
+        let mut last = -1.0;
+        for step in 0..10 {
+            let reach = 0.88 - (step as f32 / 10.0) * 0.5;
+            let k = update_knob(0.0, &frame_with_reach(reach), true);
+            assert!(k >= last, "knob went backwards at reach {reach}: {k} < {last}");
+            last = k;
+        }
+    }
+
+    #[test]
+    fn knob_holds_its_value_while_the_region_is_off() {
+        // Curling with no region up must not move the setting.
+        let held = update_knob(0.25, &frame_with_reach(0.88 * 0.4), false);
+        assert_eq!(held, 0.25, "knob moved while the region was off");
+
+        // ...and resumes tracking the moment the region returns.
+        let live = update_knob(0.25, &frame_with_reach(0.88 * 0.4), true);
+        assert!(live > 0.95, "knob did not resume: {live}");
+    }
+
+    #[test]
+    fn knob_holds_when_no_hands_are_tracked() {
+        let held = update_knob(0.7, &HandFrame::default(), true);
+        assert_eq!(held, 0.7);
+    }
+
+    #[test]
+    fn knob_is_independent_of_the_region_fingers() {
+        // Moving index and thumb (the quad corners) must not disturb the knob.
+        let mut a = frame_with_reach(0.6);
+        let before = update_knob(0.0, &a, true);
+        a.hands[0].landmarks[lm::INDEX_TIP] = Vec3::new(0.9, 0.1, 0.0);
+        a.hands[0].landmarks[lm::THUMB_TIP] = Vec3::new(0.1, 0.9, 0.0);
+        let after = update_knob(0.0, &a, true);
+        assert_eq!(before, after, "quad fingers leaked into the knob");
+        let _ = Vec2::ZERO;
+    }
+
     #[test]
     fn params_are_finite_without_hands() {
         let hands = HandFrame::default();
@@ -191,6 +291,7 @@ mod tests {
             hands: &hands,
             region: Region::None,
             time: 0.0,
+            knob: 0.0,
         };
         for e in registry() {
             for v in e.params(&ctx) {

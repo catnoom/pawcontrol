@@ -89,6 +89,7 @@ fn convex_quad(points: [Vec2; 4]) -> [Vec2; 4] {
     }
 }
 
+#[allow(dead_code)] // contains() mirrors the shader for CPU-side hit tests
 impl Region {
     /// Build a quad from four corner points in any order.
     pub fn quad(corners: [Vec2; 4]) -> Self {

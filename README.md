@@ -2,10 +2,11 @@
 
 Real-time camera effects driven by hand and finger tracking, in Rust.
 
-The built-in effect mirrors the reference clip: hold both hands up and a quad is
+Hold both hands up and a quad is
 drawn between your index and thumb tips, with everything inside it pixelated.
-Touch thumb to pinky to cycle to the next effect; pinch thumb to index to dial
-the current effect's intensity.
+Touch thumb to pinky to cycle to the next effect. Curl your middle finger to
+dial the current effect's intensity — that control is live only while the
+window is up, so it holds its setting between poses.
 
 ## Running
 
@@ -33,7 +34,7 @@ hand landmarks:    2.4 ms
 | Input | Action |
 | --- | --- |
 | thumb + pinky | next effect |
-| thumb + index | adjust current effect's intensity |
+| curl middle finger | intensity, 0 extended -> 1 fully curled (needs the window up) |
 | `space` | next effect (keyboard fallback) |
 | `d` | toggle the debug skeleton |
 | `o` | toggle the region outline |
@@ -95,8 +96,14 @@ It is compiled between a shared prelude (which supplies `cam()`,
 `resolution()`, `time()`, `region_center()` and the region mask) and the entry
 points, so you only write the interesting part. Then implement `Effect` and add
 it to `registry()` in `src/effect/mod.rs`. `params()` feeds up to four floats to
-the shader as `g.params`; `EffectCtx::pinch_knob()` gives you a 0..1 value from
-the user's pinch.
+the shader as `g.params`; `EffectCtx::knob()` gives you the 0..1 intensity
+value.
+
+The knob reads middle-finger curl, deliberately *not* index or thumb: those two
+fingertips define the quad, so using them would make the knob and the window
+the same control. It is measured in palm-widths (see
+`Finger::extended_reference`), so it does not drift as you move toward or away
+from the camera, and `update_knob` freezes it whenever the region is off.
 
 ### A new gesture
 
@@ -121,8 +128,8 @@ resolve. `SingleHandBox` is included as a one-handed example.
 cargo test
 ```
 
-31 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
-gesture hysteresis and region convexity. One test compiles every effect shader
+38 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
+gesture hysteresis, region convexity and the knob's curl calibration. One test compiles every effect shader
 on a real GPU device, so WGSL errors surface here rather than when the window
 opens. Two further tests run the full detection → crop → landmark chain against
 a real photograph, including a sweep over hand orientations; they are skipped
