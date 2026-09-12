@@ -108,9 +108,12 @@ flicker at the boundary.
 
 ### A new region shape
 
-Implement `RegionSource` in `src/region/`. `Region::Quad` is masked by the
-shader via a signed distance field that works with either winding order.
-`SingleHandBox` is included as a one-handed example.
+Implement `RegionSource` in `src/region/`, and build quads with
+`Region::quad()` rather than `Region::Quad` directly: it takes the convex hull
+of your corners, so the shape survives corners arriving in any order. That
+matters — flipping one hand swings its thumb above its index, and a fixed
+corner order would trace a self-intersecting bow-tie that the mask cannot
+resolve. `SingleHandBox` is included as a one-handed example.
 
 ## Tests
 
@@ -118,10 +121,12 @@ shader via a signed distance field that works with either winding order.
 cargo test
 ```
 
-26 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
-gesture hysteresis and region winding. One further test runs the full
-detection → crop → landmark chain against a real photograph; it is skipped
-unless you point it at an image:
+31 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
+gesture hysteresis and region convexity. One test compiles every effect shader
+on a real GPU device, so WGSL errors surface here rather than when the window
+opens. Two further tests run the full detection → crop → landmark chain against
+a real photograph, including a sweep over hand orientations; they are skipped
+unless you point them at an image:
 
 ```sh
 PAWCONTROL_TEST_IMAGE=/path/to/hand.jpg cargo test

@@ -382,4 +382,60 @@ mod tests {
              the ROI transform is probably wrong"
         );
     }
+    /// Tracking must hold up at any hand orientation.
+    ///
+    /// This is the regression test for the ROI rotation transform: a sign
+    /// error there still "works" at 0 degrees and collapses off-axis.
+    #[test]
+    fn rotation_sweep() {
+        let Ok(path) = std::env::var("PAWCONTROL_TEST_IMAGE") else {
+            eprintln!("skipping: set PAWCONTROL_TEST_IMAGE to run");
+            return;
+        };
+        let source = image::open(&path).expect("load").to_rgba8();
+
+        for deg in [0i32, 30, 60, 90, 120, 150, 180, 240, 300] {
+            let (fw, fh) = (640u32, 480u32);
+            let mut frame = Frame::new(fw, fh);
+            frame.rgba.fill(110);
+
+            // Rotate the photo about the frame centre by sampling backwards.
+            let rad = (deg as f32).to_radians();
+            let (s, c) = rad.sin_cos();
+            let scale = 0.55f32;
+            let cx = fw as f32 / 2.0;
+            let cy = fh as f32 / 2.0;
+            let sw = source.width() as f32;
+            let sh = source.height() as f32;
+            let fit = (fw as f32 * scale) / sw;
+
+            for y in 0..fh {
+                for x in 0..fw {
+                    let dx = x as f32 - cx;
+                    let dy = y as f32 - cy;
+                    let rx = (dx * c + dy * s) / fit + sw / 2.0;
+                    let ry = (-dx * s + dy * c) / fit + sh / 2.0;
+                    if rx < 0.0 || ry < 0.0 || rx >= sw || ry >= sh { continue; }
+                    let p = source.get_pixel(rx as u32, ry as u32).0;
+                    let di = ((y * fw + x) * 4) as usize;
+                    frame.rgba[di..di + 4].copy_from_slice(&p);
+                }
+            }
+
+            let mut tracker = HandTracker::new(TrackerConfig::default()).unwrap();
+            let mut best = 0.0f32;
+            let mut hands = 0;
+            for _ in 0..12 {
+                let r = tracker.track(&frame, 1.0 / 30.0).unwrap();
+                hands = hands.max(r.hands.len());
+                for h in &r.hands { best = best.max(h.score); }
+            }
+            println!("angle {deg:>3}deg -> hands {hands}, best score {best:.3}");
+            assert!(hands >= 1, "lost the hand entirely at {deg} degrees");
+            assert!(
+                best > 0.8,
+                "confidence collapsed to {best:.3} at {deg} degrees"
+            );
+        }
+    }
 }

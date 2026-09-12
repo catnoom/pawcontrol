@@ -69,7 +69,12 @@ fn region_sdf(p_px: vec2<f32>) -> f32 {
         let a = corner(i) * res;
         let b = corner((i + 1) % 4) * res;
         let e = b - a;
-        let len = max(length(e), 1.0e-6);
+        let len = length(e);
+        // A zero-length edge (coincident corners) has no normal; skipping it
+        // avoids poisoning the max with a bogus zero distance.
+        if (len < 1.0e-4) {
+            continue;
+        }
         // Outward normal for this winding.
         let n = (vec2<f32>(e.y, -e.x) / len) * s;
         d = max(d, dot(p_px - a, n));

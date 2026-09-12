@@ -425,3 +425,88 @@ fn build_effect_pipeline(
         cache: None,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Compile every effect shader on a real device.
+    ///
+    /// Shaders are assembled and compiled at runtime, so a WGSL error would
+    /// otherwise only surface when the window opens. This catches it in
+    /// `cargo test` instead. Skips if the machine has no usable GPU adapter.
+    #[test]
+    fn every_effect_shader_compiles() {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let (device, _queue) = pollster::block_on(
+            adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("shader-test"),
+                ..Default::default()
+            }),
+        )
+        .expect("requesting a device");
+
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+
+        for effect in crate::effect::registry() {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let _pipeline = build_effect_pipeline(
+                &device,
+                &pipeline_layout,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                effect.as_ref(),
+            )
+            .expect("building the pipeline");
+            if let Some(err) = pollster::block_on(scope.pop()) {
+                panic!("effect '{}' failed to compile:\n{err}", effect.name());
+            }
+        }
+
+        // The overlay shader ships separately from the effect prelude.
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _overlay = Overlay::new(&device, &layout, wgpu::TextureFormat::Rgba8UnormSrgb);
+        if let Some(err) = pollster::block_on(scope.pop()) {
+            panic!("overlay shader failed to compile:\n{err}");
+        }
+    }
+}
