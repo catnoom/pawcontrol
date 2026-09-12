@@ -1,8 +1,10 @@
 [package]
 name = "pawcontrol"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.85"
+edition = "2024"
+# Floor set by the dependencies, not by this crate: ort needs 1.88 and
+# wgpu 1.87. Claiming lower would fail to build rather than warn.
+rust-version = "1.88"
 
 [dependencies]
 anyhow = "1.0"
