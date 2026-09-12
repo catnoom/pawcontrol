@@ -1,0 +1,38 @@
+[package]
+name = "pawcontrol"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[dependencies]
+anyhow = "1.0"
+bytemuck = { version = "1.25", features = ["derive"] }
+glam = { version = "0.33", features = ["bytemuck"] }
+pollster = "1.0"
+wgpu = "30.0"
+winit = "0.30"
+log = "0.4"
+env_logger = "0.11"
+
+[dependencies.nokhwa]
+version = "0.10"
+default-features = false
+features = ["decoding", "input-msmf"]
+
+[dependencies.ort]
+version = "2.0.0-rc.13"
+features = ["ndarray", "download-binaries", "copy-dylibs", "directml"]
+
+[dev-dependencies]
+# Only used by the optional real-image tracking test; `image` is already in the
+# dependency graph via nokhwa, so this adds no build cost.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[profile.dev]
+opt-level = 1          # tracking math is unusably slow in a pure debug build
+
+[profile.dev.package."*"]
+opt-level = 3          # ort / image decode / wgpu deps always optimized
+
+[profile.release]
+lto = "thin"
