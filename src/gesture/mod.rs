@@ -75,7 +75,6 @@ pub struct FingerTouch {
     cooldown_secs: f32,
 }
 
-#[allow(dead_code)] // threshold tuning for new gestures
 impl FingerTouch {
     pub fn new(a: Finger, b: Finger) -> Self {
         Self {
@@ -89,11 +88,6 @@ impl FingerTouch {
         }
     }
 
-    pub fn with_thresholds(mut self, enter: f32, exit: f32) -> Self {
-        self.enter = enter;
-        self.exit = exit;
-        self
-    }
 }
 
 impl GestureDetector for FingerTouch {
@@ -154,7 +148,7 @@ impl GestureDetector for HandCount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracking::hand::{lm, Hand, Handedness, LANDMARK_COUNT};
+    use crate::tracking::hand::{lm, Hand, LANDMARK_COUNT};
     use glam::Vec3;
 
     /// A synthetic hand with a controllable thumb/pinky gap.
@@ -169,7 +163,6 @@ mod tests {
         landmarks[lm::PINKY_TIP] = Vec3::new(0.5 + gap, 0.5, 0.0);
         Hand {
             landmarks,
-            handedness: Handedness::Right,
             score: 1.0,
         }
     }
@@ -177,7 +170,6 @@ mod tests {
     fn frame(gap: f32) -> HandFrame {
         HandFrame {
             hands: vec![hand_with_gap(gap)],
-            seq: 0,
         }
     }
 

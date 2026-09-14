@@ -1,6 +1,6 @@
 //! Hand landmark stage: turns an upright hand crop into 21 positioned joints.
 
-use super::hand::{lm, Hand, Handedness, LANDMARK_COUNT};
+use super::hand::{lm, Hand, LANDMARK_COUNT};
 use super::roi::Roi;
 use glam::{Vec2, Vec3};
 
@@ -16,15 +16,8 @@ pub const HAND_BOX_SHIFT: Vec2 = Vec2::new(0.0, -0.1);
 
 /// Decode the landmark model's outputs into a `Hand` in normalized image space.
 ///
-/// `raw` is the 63-value `[x, y, z] * 21` tensor in crop-pixel coordinates,
-/// `handedness` is the model's 0=left / 1=right scalar.
-pub fn decode(
-    raw: &[f32],
-    score: f32,
-    handedness: f32,
-    roi: &Roi,
-    frame_size: Vec2,
-) -> Option<Hand> {
+/// `raw` is the 63-value `[x, y, z] * 21` tensor in crop-pixel coordinates.
+pub fn decode(raw: &[f32], score: f32, roi: &Roi, frame_size: Vec2) -> Option<Hand> {
     if raw.len() < LANDMARK_COUNT * 3 {
         return None;
     }
@@ -47,15 +40,7 @@ pub fn decode(
         *out = Vec3::new(px.x / frame_size.x, px.y / frame_size.y, depth);
     }
 
-    Some(Hand {
-        landmarks,
-        handedness: if handedness < 0.5 {
-            Handedness::Left
-        } else {
-            Handedness::Right
-        },
-        score,
-    })
+    Some(Hand { landmarks, score })
 }
 
 /// Rotation implied by the wrist -> middle-knuckle vector.
@@ -93,11 +78,10 @@ mod tests {
         // Every landmark at the crop center must land on the ROI center.
         let raw = vec![112.0, 112.0, 0.0].repeat(LANDMARK_COUNT);
         let frame = Vec2::new(640.0, 480.0);
-        let hand = decode(&raw, 0.99, 1.0, &upright_roi(), frame).unwrap();
+        let hand = decode(&raw, 0.99, &upright_roi(), frame).unwrap();
         let p = hand.point(0);
         assert!((p.x - 0.5).abs() < 1e-5, "{p:?}");
         assert!((p.y - 0.5).abs() < 1e-5, "{p:?}");
-        assert_eq!(hand.handedness, Handedness::Right);
     }
 
     #[test]
@@ -107,9 +91,9 @@ mod tests {
         let mut raw = vec![112.0, 112.0, 0.0].repeat(LANDMARK_COUNT);
         raw[0] = 224.0; // landmark 0 at the right edge of the crop
 
-        let small = decode(&raw, 1.0, 0.0, &upright_roi(), frame).unwrap();
+        let small = decode(&raw, 1.0, &upright_roi(), frame).unwrap();
         let big_roi = Roi { side: 448.0, ..upright_roi() };
-        let big = decode(&raw, 1.0, 0.0, &big_roi, frame).unwrap();
+        let big = decode(&raw, 1.0, &big_roi, frame).unwrap();
 
         let d_small = small.point(0).x - 0.5;
         let d_big = big.point(0).x - 0.5;

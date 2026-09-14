@@ -120,7 +120,7 @@ Implement `RegionSource` in `src/region/`, and build quads with
 of your corners, so the shape survives corners arriving in any order. That
 matters — flipping one hand swings its thumb above its index, and a fixed
 corner order would trace a self-intersecting bow-tie that the mask cannot
-resolve. `SingleHandBox` is included as a one-handed example.
+resolve.
 
 ## Tests
 
@@ -128,7 +128,7 @@ resolve. `SingleHandBox` is included as a one-handed example.
 cargo test
 ```
 
-38 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
+35 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
 gesture hysteresis, region convexity and the knob's curl calibration. One test compiles every effect shader
 on a real GPU device, so WGSL errors surface here rather than when the window
 opens. Two further tests run the full detection → crop → landmark chain against

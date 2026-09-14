@@ -16,7 +16,6 @@ pub enum Region {
     Quad([Vec2; 4]),
 }
 
-#[allow(dead_code)] // contains() mirrors the shader for CPU-side hit tests
 /// Order four points into a convex, simply-connected quad.
 ///
 /// Callers supply corners in whatever order their landmarks come in, which is
@@ -89,7 +88,6 @@ fn convex_quad(points: [Vec2; 4]) -> [Vec2; 4] {
     }
 }
 
-#[allow(dead_code)] // contains() mirrors the shader for CPU-side hit tests
 impl Region {
     /// Build a quad from four corner points in any order.
     pub fn quad(corners: [Vec2; 4]) -> Self {
@@ -98,29 +96,6 @@ impl Region {
 
     pub fn is_active(&self) -> bool {
         !matches!(self, Region::None)
-    }
-
-    /// Point-in-shape test, mirroring what the shader does.
-    pub fn contains(&self, p: Vec2) -> bool {
-        match self {
-            Region::None => false,
-            Region::Quad(c) => {
-                let mut positive = 0;
-                let mut negative = 0;
-                for i in 0..4 {
-                    let a = c[i];
-                    let b = c[(i + 1) % 4];
-                    let cross = (b - a).perp_dot(p - a);
-                    if cross > 0.0 {
-                        positive += 1;
-                    } else if cross < 0.0 {
-                        negative += 1;
-                    }
-                }
-                // Inside iff the point is on the same side of every edge.
-                positive == 0 || negative == 0
-            }
-        }
     }
 
     pub fn corners(&self) -> Option<[Vec2; 4]> {
@@ -174,38 +149,10 @@ impl RegionSource for TwoHandQuad {
     }
 }
 
-/// A quad from a single hand's thumb and index, useful for one-handed effects.
-/// Not wired up by default; swap it in via `App::region_source`.
-#[allow(dead_code)]
-#[derive(Default)]
-pub struct SingleHandBox;
-
-impl RegionSource for SingleHandBox {
-    fn name(&self) -> &str {
-        "single-hand-box"
-    }
-
-    fn region(&self, frame: &HandFrame) -> Region {
-        let Some(hand) = frame.hands.first() else {
-            return Region::None;
-        };
-        let a = hand.tip(Finger::Thumb);
-        let b = hand.tip(Finger::Index);
-        // Axis-aligned box spanned by the two fingertips.
-        let (min, max) = (a.min(b), a.max(b));
-        Region::quad([
-            Vec2::new(min.x, min.y),
-            Vec2::new(max.x, min.y),
-            Vec2::new(max.x, max.y),
-            Vec2::new(min.x, max.y),
-        ])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracking::hand::{lm, Hand, Handedness, LANDMARK_COUNT};
+    use crate::tracking::hand::{lm, Hand, LANDMARK_COUNT};
     use glam::Vec3;
 
     fn hand_at(x: f32, index_y: f32, thumb_y: f32) -> Hand {
@@ -219,7 +166,6 @@ mod tests {
         landmarks[lm::WRIST] = Vec3::new(x, 0.5, 0.0);
         Hand {
             landmarks,
-            handedness: Handedness::Right,
             score: 1.0,
         }
     }
@@ -230,7 +176,6 @@ mod tests {
         assert_eq!(src.region(&HandFrame::default()), Region::None);
         let one = HandFrame {
             hands: vec![hand_at(0.3, 0.2, 0.6)],
-            seq: 0,
         };
         assert_eq!(src.region(&one), Region::None);
     }
@@ -240,7 +185,6 @@ mod tests {
         // Deliberately pass the right-most hand first: the source must sort.
         let frame = HandFrame {
             hands: vec![hand_at(0.8, 0.2, 0.6), hand_at(0.2, 0.2, 0.6)],
-            seq: 0,
         };
         let region = TwoHandQuad::default().region(&frame);
         let c = region.corners().expect("expected a quad");
@@ -249,38 +193,7 @@ mod tests {
         assert!(c[0].y < c[3].y, "index tip sits above thumb tip: {c:?}");
     }
 
-    #[test]
-    fn contains_matches_the_quad() {
-        let frame = HandFrame {
-            hands: vec![hand_at(0.2, 0.2, 0.6), hand_at(0.8, 0.2, 0.6)],
-            seq: 0,
-        };
-        let region = TwoHandQuad::default().region(&frame);
-        assert!(region.contains(Vec2::new(0.5, 0.4)), "center should be inside");
-        assert!(!region.contains(Vec2::new(0.05, 0.4)), "left of the quad");
-        assert!(!region.contains(Vec2::new(0.5, 0.9)), "below the quad");
-    }
 
-    #[test]
-    fn contains_is_winding_agnostic() {
-        // Same square, corners listed the other way round.
-        let cw = Region::Quad([
-            Vec2::new(0.0, 0.0),
-            Vec2::new(1.0, 0.0),
-            Vec2::new(1.0, 1.0),
-            Vec2::new(0.0, 1.0),
-        ]);
-        let ccw = Region::Quad([
-            Vec2::new(0.0, 1.0),
-            Vec2::new(1.0, 1.0),
-            Vec2::new(1.0, 0.0),
-            Vec2::new(0.0, 0.0),
-        ]);
-        assert!(cw.contains(Vec2::splat(0.5)));
-        assert!(ccw.contains(Vec2::splat(0.5)));
-        assert!(!cw.contains(Vec2::new(1.5, 0.5)));
-        assert!(!ccw.contains(Vec2::new(1.5, 0.5)));
-    }
 }
 
 #[cfg(test)]
@@ -326,10 +239,13 @@ mod flip_tests {
             let region = Region::quad(input);
             let c = region.corners().unwrap();
             assert!(is_convex(&c), "order {order:?} produced a non-convex quad: {c:?}");
-            assert!(
-                region.contains(Vec2::new(0.5, 0.5)),
-                "order {order:?} lost the centre"
-            );
+            // The hull must keep all four input points, just reordered.
+            for p in input {
+                assert!(
+                    c.iter().any(|q| q.distance(p) < 1e-6),
+                    "order {order:?} dropped corner {p:?}"
+                );
+            }
         }
     }
 
@@ -349,7 +265,6 @@ mod flip_tests {
             let d = c[i].distance(c[(i + 1) % 4]);
             assert!(d > 1e-6, "degenerate edge {i} has no normal: {c:?}");
         }
-        assert!(region.contains(Vec2::new(0.5, 0.3)));
     }
 
     #[test]
@@ -362,7 +277,7 @@ mod flip_tests {
             Vec2::new(0.8, 0.7), // right thumb (bottom-right)
             Vec2::new(0.2, 0.7), // left thumb  (bottom-left)
         ]);
-        assert!(normal.contains(Vec2::new(0.5, 0.5)), "baseline should work");
+        assert!(is_convex(&normal.corners().unwrap()), "baseline should work");
 
         // Now flip ONLY the left hand. Its thumb swings above its index, so
         // the first and last corners swap vertically and the path crosses
@@ -373,12 +288,11 @@ mod flip_tests {
             Vec2::new(0.8, 0.7), // right thumb
             Vec2::new(0.2, 0.3), // left thumb  (now ABOVE)
         ]);
+        // Convexity is the property the shader's SDF depends on; a bow-tie
+        // fails it, which is exactly the bug this guards.
         assert!(
-            flipped.contains(Vec2::new(0.5, 0.5)),
-            "flipping one hand must not break the region mask"
+            is_convex(&flipped.corners().unwrap()),
+            "flipping one hand produced a self-intersecting quad"
         );
-        // The region must still exclude points genuinely outside it.
-        assert!(!flipped.contains(Vec2::new(0.5, 0.95)));
-        assert!(!flipped.contains(Vec2::new(0.02, 0.5)));
     }
 }

@@ -104,7 +104,7 @@ impl App {
         if n == 0 {
             return;
         }
-        self.effect_index = (((self.effect_index as i32 + delta) % n + n) % n) as usize;
+        self.effect_index = (self.effect_index as i32 + delta).rem_euclid(n) as usize;
         log::info!("effect -> {}", self.effects[self.effect_index].name());
     }
 
@@ -123,14 +123,20 @@ impl App {
                     1.5,
                 ));
             }
-            // Mark the fingertips that drive the region.
-            for finger in [Finger::Thumb, Finger::Index] {
+            // Mark every fingertip, colouring the two that anchor the region
+            // and the one that drives the knob so their roles are visible.
+            for finger in Finger::ALL {
+                let color = match finger {
+                    Finger::Thumb | Finger::Index => [1.0, 0.3, 0.4, 1.0], // quad corners
+                    f if f == effect::KNOB_FINGER => [1.0, 0.8, 0.2, 1.0], // intensity knob
+                    _ => [0.4, 0.6, 1.0, 0.8],
+                };
                 let p = hand.tip(finger);
                 let r = 0.006;
                 self.lines.push(LineInstance::new(
                     p - glam::Vec2::new(r, 0.0),
                     p + glam::Vec2::new(r, 0.0),
-                    [1.0, 0.3, 0.4, 1.0],
+                    color,
                     3.0,
                 ));
             }
@@ -184,9 +190,7 @@ impl App {
 
         let params = {
             let ctx = EffectCtx {
-                hands: &hands,
                 region,
-                time,
                 knob: self.knob,
             };
             self.effects[self.effect_index].params(&ctx)

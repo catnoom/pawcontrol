@@ -19,7 +19,6 @@ pub struct Roi {
     pub angle: f32,
 }
 
-#[allow(dead_code)] // mapping helpers used by tests and future region sources
 impl Roi {
     /// Local axes expressed in image space. `u` is local +x, `v` is local +y
     /// (downward, since image space grows downward).
@@ -60,12 +59,6 @@ impl Roi {
         }
     }
 
-    /// Map a point from crop space (0..1, origin top-left) to image pixels.
-    pub fn crop_to_image(&self, uv: Vec2) -> Vec2 {
-        let (u, v) = self.axes();
-        let local = (uv - Vec2::splat(0.5)) * self.side;
-        self.center + u * local.x + v * local.y
-    }
 
     /// Map an offset in crop pixels (relative to crop center) into an image
     /// offset. Used to place landmarks the model reports in its own space.
@@ -101,18 +94,6 @@ impl Roi {
 mod tests {
     use super::*;
 
-    #[test]
-    fn unrotated_roi_maps_corners() {
-        let roi = Roi {
-            center: Vec2::new(100.0, 50.0),
-            side: 20.0,
-            angle: 0.0,
-        };
-        let tl = roi.crop_to_image(Vec2::ZERO);
-        assert!((tl - Vec2::new(90.0, 40.0)).length() < 1e-4, "{tl:?}");
-        let br = roi.crop_to_image(Vec2::ONE);
-        assert!((br - Vec2::new(110.0, 60.0)).length() < 1e-4, "{br:?}");
-    }
 
     #[test]
     fn quarter_turn_rotates_local_axes() {

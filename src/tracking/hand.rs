@@ -17,7 +17,6 @@ use glam::{Vec2, Vec3};
 ///       2    \|/
 ///        1----0               <- wrist
 /// ```
-#[allow(dead_code)] // complete landmark table, kept as the reference topology
 pub mod lm {
     pub const WRIST: usize = 0;
     pub const THUMB_CMC: usize = 1;
@@ -46,12 +45,33 @@ pub const LANDMARK_COUNT: usize = 21;
 
 /// Connected joint pairs, for drawing the skeleton overlay.
 pub const BONES: [(usize, usize); 21] = [
-    (0, 1), (1, 2), (2, 3), (3, 4),             // thumb
-    (0, 5), (5, 6), (6, 7), (7, 8),             // index
-    (9, 10), (10, 11), (11, 12),                // middle
-    (13, 14), (14, 15), (15, 16),               // ring
-    (0, 17), (17, 18), (18, 19), (19, 20),      // pinky
-    (5, 9), (9, 13), (13, 17),                  // palm arch
+    // Thumb.
+    (lm::WRIST, lm::THUMB_CMC),
+    (lm::THUMB_CMC, lm::THUMB_MCP),
+    (lm::THUMB_MCP, lm::THUMB_IP),
+    (lm::THUMB_IP, lm::THUMB_TIP),
+    // Index.
+    (lm::WRIST, lm::INDEX_MCP),
+    (lm::INDEX_MCP, lm::INDEX_PIP),
+    (lm::INDEX_PIP, lm::INDEX_DIP),
+    (lm::INDEX_DIP, lm::INDEX_TIP),
+    // Middle.
+    (lm::MIDDLE_MCP, lm::MIDDLE_PIP),
+    (lm::MIDDLE_PIP, lm::MIDDLE_DIP),
+    (lm::MIDDLE_DIP, lm::MIDDLE_TIP),
+    // Ring.
+    (lm::RING_MCP, lm::RING_PIP),
+    (lm::RING_PIP, lm::RING_DIP),
+    (lm::RING_DIP, lm::RING_TIP),
+    // Pinky.
+    (lm::WRIST, lm::PINKY_MCP),
+    (lm::PINKY_MCP, lm::PINKY_PIP),
+    (lm::PINKY_PIP, lm::PINKY_DIP),
+    (lm::PINKY_DIP, lm::PINKY_TIP),
+    // Knuckle arch across the palm.
+    (lm::INDEX_MCP, lm::MIDDLE_MCP),
+    (lm::MIDDLE_MCP, lm::RING_MCP),
+    (lm::RING_MCP, lm::PINKY_MCP),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,7 +83,6 @@ pub enum Finger {
     Pinky,
 }
 
-#[allow(dead_code)] // mcp() is used by tests and custom gestures
 impl Finger {
     pub const ALL: [Finger; 5] = [
         Finger::Thumb,
@@ -110,22 +129,6 @@ impl Finger {
         }
     }
 
-    /// Middle joint, used to decide whether the finger is curled.
-    pub fn pip(self) -> usize {
-        match self {
-            Finger::Thumb => lm::THUMB_MCP,
-            Finger::Index => lm::INDEX_PIP,
-            Finger::Middle => lm::MIDDLE_PIP,
-            Finger::Ring => lm::RING_PIP,
-            Finger::Pinky => lm::PINKY_PIP,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Handedness {
-    Left,
-    Right,
 }
 
 /// One tracked hand for one frame.
@@ -136,12 +139,10 @@ pub enum Handedness {
 #[derive(Debug, Clone)]
 pub struct Hand {
     pub landmarks: [Vec3; LANDMARK_COUNT],
-    pub handedness: Handedness,
     /// Landmark-model presence score, 0..1.
     pub score: f32,
 }
 
-#[allow(dead_code)] // query surface for writing new gestures/regions
 impl Hand {
     pub fn point(&self, idx: usize) -> Vec2 {
         self.landmarks[idx].truncate()
@@ -151,9 +152,6 @@ impl Hand {
         self.point(finger.tip())
     }
 
-    pub fn wrist(&self) -> Vec2 {
-        self.point(lm::WRIST)
-    }
 
     /// Rough palm width in normalized units.
     ///
@@ -187,18 +185,6 @@ impl Hand {
         ((extended - d) / (extended - curled)).clamp(0.0, 1.0)
     }
 
-    /// Whether a finger is extended, judged by tip-vs-knuckle distance from
-    /// the wrist. Robust to hand rotation, unlike a pure y comparison.
-    pub fn is_extended(&self, finger: Finger) -> bool {
-        let wrist = self.wrist();
-        let tip = wrist.distance(self.point(finger.tip()));
-        let pip = wrist.distance(self.point(finger.pip()));
-        tip > pip * 1.15
-    }
-
-    pub fn extended_count(&self) -> usize {
-        Finger::ALL.iter().filter(|f| self.is_extended(**f)).count()
-    }
 
     /// Centroid of the palm, steadier than any single landmark.
     pub fn palm_center(&self) -> Vec2 {
@@ -217,16 +203,9 @@ impl Hand {
 #[derive(Debug, Clone, Default)]
 pub struct HandFrame {
     pub hands: Vec<Hand>,
-    /// Monotonic frame counter, so consumers can tell stale data from fresh.
-    #[allow(dead_code)]
-    pub seq: u64,
 }
 
-#[allow(dead_code)]
 impl HandFrame {
-    pub fn get(&self, which: Handedness) -> Option<&Hand> {
-        self.hands.iter().find(|h| h.handedness == which)
-    }
 
     /// The strongest curl of `finger` across all tracked hands.
     ///

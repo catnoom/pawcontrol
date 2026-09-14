@@ -63,7 +63,6 @@ pub struct OneEuro {
     prev: Option<Vec3>,
 }
 
-#[allow(dead_code)] // reset is for re-acquisition
 impl OneEuro {
     pub fn filter(&mut self, x: Vec3, dt: f32, cfg: &OneEuroConfig) -> Vec3 {
         let dt = dt.max(1e-4);
@@ -78,9 +77,6 @@ impl OneEuro {
         self.x.apply(x, alpha(cutoff, dt))
     }
 
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
 }
 
 /// One filter per landmark, for one tracked hand.
@@ -99,7 +95,6 @@ impl Default for HandFilter {
     }
 }
 
-#[allow(dead_code)]
 impl HandFilter {
     pub fn apply(&mut self, landmarks: &mut [Vec3; super::hand::LANDMARK_COUNT], dt: f32) {
         for (j, p) in self.joints.iter_mut().zip(landmarks.iter_mut()) {
@@ -107,11 +102,6 @@ impl HandFilter {
         }
     }
 
-    pub fn reset(&mut self) {
-        for j in &mut self.joints {
-            j.reset();
-        }
-    }
 }
 
 #[cfg(test)]

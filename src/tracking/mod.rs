@@ -150,10 +150,7 @@ impl HandTracker {
         }
 
         self.tracks = surviving;
-        Ok(HandFrame {
-            hands,
-            seq: self.seq,
-        })
+        Ok(HandFrame { hands })
     }
 
     /// Seed new tracks from palm detection, skipping palms we already track.
@@ -231,16 +228,13 @@ impl HandTracker {
         ))?;
         let outputs = self.landmarks.run(ort::inputs!["input_1" => input])?;
 
-        // Output order is fixed by the model: landmarks, confidence,
-        // handedness, world landmarks.
+        // The model emits landmarks, confidence, handedness and world
+        // landmarks; we only need the first two.
         let (_, raw) = outputs["Identity"].try_extract_tensor::<f32>()?;
         let (_, conf) = outputs["Identity_1"].try_extract_tensor::<f32>()?;
-        let (_, handed) = outputs["Identity_2"].try_extract_tensor::<f32>()?;
-
         let score = conf.first().copied().unwrap_or(0.0);
-        let handedness = handed.first().copied().unwrap_or(1.0);
 
-        Ok(landmark::decode(raw, score, handedness, roi, frame.size()))
+        Ok(landmark::decode(raw, score, roi, frame.size()))
     }
 }
 
@@ -295,30 +289,34 @@ pub fn to_pixels(landmarks: &[Vec3; LANDMARK_COUNT], size: Vec2) -> Vec<Vec2> {
 mod tests {
     use super::*;
 
-    /// End-to-end check against a real photograph.
+    /// Load the optional real-photograph fixture.
     ///
-    /// Skipped unless `PAWCONTROL_TEST_IMAGE` points at an image file, so the
-    /// normal test run stays hermetic and offline. This is the only test that
-    /// exercises palm detection -> ROI -> landmarks as a chain; the unit tests
-    /// elsewhere cover each transform in isolation.
-    #[test]
-    fn tracks_a_hand_in_a_real_photo() {
+    /// Returns `None` — skipping the caller — when `PAWCONTROL_TEST_IMAGE` is
+    /// unset *or* points at a file that is not there. The fixture is an
+    /// external asset, so a missing one should skip like an unset variable
+    /// rather than fail the whole suite.
+    fn fixture() -> Option<image::RgbaImage> {
         let Ok(path) = std::env::var("PAWCONTROL_TEST_IMAGE") else {
             eprintln!("skipping: set PAWCONTROL_TEST_IMAGE to run");
-            return;
+            return None;
         };
+        if !std::path::Path::new(&path).is_file() {
+            eprintln!("skipping: PAWCONTROL_TEST_IMAGE={path} does not exist");
+            return None;
+        }
+        Some(image::open(&path).expect("loading test image").to_rgba8())
+    }
 
-        let source = image::open(&path).expect("loading test image").to_rgba8();
-
-        // Composite the photo into a webcam-like framing. Palm detection is
-        // trained on hands that occupy part of the scene, not ones that fill
-        // the entire frame, so a raw close-up is out of distribution.
+    /// Composite the fixture into a webcam-like framing.
+    ///
+    /// Palm detection is trained on hands that occupy part of a scene, not
+    /// ones filling the whole frame, so a raw close-up is out of distribution.
+    fn webcam_framing(source: &image::RgbaImage) -> Frame {
         let (fw, fh) = (640u32, 480u32);
-        let scale = 0.55;
-        let tw = (fw as f32 * scale) as u32;
+        let tw = (fw as f32 * 0.55) as u32;
         let th = source.height() * tw / source.width();
         let resized =
-            image::imageops::resize(&source, tw, th, image::imageops::FilterType::Triangle);
+            image::imageops::resize(source, tw, th, image::imageops::FilterType::Triangle);
 
         let mut frame = Frame::new(fw, fh);
         // Mid-grey background rather than black: less of a hard edge for the
@@ -332,6 +330,19 @@ mod tests {
                 frame.rgba[di..di + 4].copy_from_slice(&src);
             }
         }
+        frame
+    }
+
+    /// End-to-end check against a real photograph.
+    ///
+    /// Skipped unless `PAWCONTROL_TEST_IMAGE` points at an image file, so the
+    /// normal test run stays hermetic and offline. This is the only test that
+    /// exercises palm detection -> ROI -> landmarks as a chain; the unit tests
+    /// elsewhere cover each transform in isolation.
+    #[test]
+    fn tracks_a_hand_in_a_real_photo() {
+        let Some(source) = fixture() else { return };
+        let frame = webcam_framing(&source);
 
         let mut tracker =
             HandTracker::new(TrackerConfig::default()).expect("creating the tracker");
@@ -367,7 +378,7 @@ mod tests {
         // The decisive geometry check: on an open palm every fingertip must sit
         // further from the wrist than its own knuckle. A sign error or a bad
         // rotation in the ROI transform collapses this immediately.
-        let wrist = hand.wrist();
+        let wrist = hand.point(hand::lm::WRIST);
         let mut extended = 0;
         for finger in hand::Finger::ALL {
             let tip = wrist.distance(hand.point(finger.tip()));
@@ -388,11 +399,7 @@ mod tests {
     /// error there still "works" at 0 degrees and collapses off-axis.
     #[test]
     fn rotation_sweep() {
-        let Ok(path) = std::env::var("PAWCONTROL_TEST_IMAGE") else {
-            eprintln!("skipping: set PAWCONTROL_TEST_IMAGE to run");
-            return;
-        };
-        let source = image::open(&path).expect("load").to_rgba8();
+        let Some(source) = fixture() else { return };
 
         for deg in [0i32, 30, 60, 90, 120, 150, 180, 240, 300] {
             let (fw, fh) = (640u32, 480u32);
@@ -447,26 +454,8 @@ mod tests {
     /// intensity knob.
     #[test]
     fn open_palm_reads_as_extended() {
-        let Ok(path) = std::env::var("PAWCONTROL_TEST_IMAGE") else {
-            eprintln!("skipping: set PAWCONTROL_TEST_IMAGE to run");
-            return;
-        };
-        let source = image::open(&path).expect("load").to_rgba8();
-        let (fw, fh) = (640u32, 480u32);
-        let tw = (fw as f32 * 0.55) as u32;
-        let th = source.height() * tw / source.width();
-        let resized =
-            image::imageops::resize(&source, tw, th, image::imageops::FilterType::Triangle);
-        let mut frame = Frame::new(fw, fh);
-        frame.rgba.fill(110);
-        let (ox, oy) = ((fw - tw) / 2, fh.saturating_sub(th) / 2);
-        for y in 0..th.min(fh - oy) {
-            for x in 0..tw {
-                let px = resized.get_pixel(x, y).0;
-                let di = (((y + oy) * fw + x + ox) * 4) as usize;
-                frame.rgba[di..di + 4].copy_from_slice(&px);
-            }
-        }
+        let Some(source) = fixture() else { return };
+        let frame = webcam_framing(&source);
 
         let mut tracker = HandTracker::new(TrackerConfig::default()).unwrap();
         for _ in 0..12 {

@@ -28,18 +28,14 @@ pub fn update_knob(current: f32, hands: &HandFrame, region_active: bool) -> f32 
 }
 
 /// What an effect can react to when computing its parameters.
-#[allow(dead_code)] // `time` is available to effects that need animation
-pub struct EffectCtx<'a> {
-    pub hands: &'a HandFrame,
+pub struct EffectCtx {
     pub region: Region,
-    pub time: f32,
     /// Intensity control, 0..1: 0 with the middle finger extended, 1 fully
     /// curled. Held steady while the region is off — see [`update_knob`].
     pub knob: f32,
 }
 
-#[allow(dead_code)]
-impl EffectCtx<'_> {
+impl EffectCtx {
     /// Intensity control, 0..1. Curl the middle finger to raise it.
     pub fn knob(&self) -> f32 {
         self.knob.clamp(0.0, 1.0)
@@ -203,7 +199,7 @@ mod tests {
         assert_eq!(before, names.len(), "duplicate effect names: {names:?}");
     }
 
-    use crate::tracking::hand::{lm, Hand, Handedness, LANDMARK_COUNT};
+    use crate::tracking::hand::{lm, Hand, LANDMARK_COUNT};
     use glam::{Vec2, Vec3};
 
     /// A hand whose middle fingertip sits `reach` palm-widths from its knuckle.
@@ -218,7 +214,6 @@ mod tests {
         landmarks[lm::MIDDLE_TIP] = Vec3::new(0.55, 0.5 - reach * 0.1, 0.0);
         Hand {
             landmarks,
-            handedness: Handedness::Right,
             score: 1.0,
         }
     }
@@ -226,7 +221,6 @@ mod tests {
     fn frame_with_reach(reach: f32) -> HandFrame {
         HandFrame {
             hands: vec![hand_with_middle_reach(reach)],
-            seq: 0,
         }
     }
 
@@ -286,11 +280,8 @@ mod tests {
 
     #[test]
     fn params_are_finite_without_hands() {
-        let hands = HandFrame::default();
         let ctx = EffectCtx {
-            hands: &hands,
             region: Region::None,
-            time: 0.0,
             knob: 0.0,
         };
         for e in registry() {
