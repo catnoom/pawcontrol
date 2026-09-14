@@ -38,6 +38,7 @@ hand landmarks:    2.4 ms
 | thumb + pinky | next effect |
 | curl middle finger | intensity, 0 extended -> 1 fully curled (needs the window up) |
 | `space` | next effect (keyboard fallback) |
+| `f` | freeze the zone in place (hands can then move away) |
 | `h` | show/hide the control panel |
 | `d` | toggle the debug skeleton |
 | `o` | toggle the region outline |
@@ -163,7 +164,7 @@ resolve.
 cargo test
 ```
 
-36 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
+41 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
 gesture hysteresis, region convexity and the knob's curl calibration. Two tests run against a real GPU device — one compiles every effect
 shader, the other drives the egui paint path — so rendering errors surface here
 rather than when the window opens. Two further tests run the full detection → crop → landmark chain against

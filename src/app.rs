@@ -13,7 +13,7 @@ use winit::window::{Window, WindowId};
 use crate::camera::{self, CameraConfig, CameraHandle, FrameBus};
 use crate::effect::{self, Effect, EffectCtx};
 use crate::gesture::{FingerTouch, GestureEngine, GestureEvent, HandCount};
-use crate::region::{RegionSource, TwoHandQuad};
+use crate::region::{self, RegionSource, TwoHandQuad};
 use crate::render::overlay::LineInstance;
 use crate::render::{RenderInput, Renderer};
 use crate::settings::{self, Shared, TrackingSettings};
@@ -50,6 +50,10 @@ pub struct App {
     outline_width: f32,
     /// When set, the intensity slider wins over middle-finger curl.
     knob_manual: bool,
+    /// Whether the zone is held in place.
+    freeze: bool,
+    /// The region latched when freezing began.
+    latched_region: Option<crate::region::Region>,
     tracking: Shared<TrackingSettings>,
     ui: Option<Ui>,
     /// Smoothed frame rate for the panel readout.
@@ -107,6 +111,8 @@ impl App {
             outline_color: [1.0, 1.0, 1.0],
             outline_width: 1.2,
             knob_manual: false,
+            freeze: false,
+            latched_region: None,
             tracking,
             ui: None,
             fps: 0.0,
@@ -201,13 +207,16 @@ impl App {
             }
         }
 
-        let region = self.region_source.region(&hands);
+        let live_region = self.region_source.region(&hands);
+        let region = region::resolve(live_region, &mut self.latched_region, self.freeze);
         let time = self.start.elapsed().as_secs_f32();
 
         // The knob only tracks while the window is actually up, so curling a
         // finger with no region showing leaves the setting untouched.
         if !self.knob_manual {
-            self.knob = effect::update_knob(self.knob, &hands, region.is_active());
+            // Driven by the *live* region: with the zone frozen you can still
+            // dial intensity, which would otherwise freeze along with it.
+            self.knob = effect::update_knob(self.knob, &hands, live_region.is_active());
         }
 
         let params = {
@@ -249,6 +258,7 @@ impl App {
                         effect_index: &mut self.effect_index,
                         knob: &mut self.knob,
                         knob_manual: &mut self.knob_manual,
+                        freeze: &mut self.freeze,
                         mirror: &mut self.mirror,
                         show_skeleton: &mut self.show_skeleton,
                         show_outline: &mut self.show_outline,
@@ -402,6 +412,10 @@ impl ApplicationHandler for App {
                     Key::Character("m") => self.mirror = !self.mirror,
                     Key::Character("d") => self.show_skeleton = !self.show_skeleton,
                     Key::Character("o") => self.show_outline = !self.show_outline,
+                    Key::Character("f") => {
+                        self.freeze = !self.freeze;
+                        log::info!("zone {}", if self.freeze { "frozen" } else { "live" });
+                    }
                     Key::Character("h") => {
                         if let Some(ui) = self.ui.as_mut() {
                             ui.open = !ui.open;

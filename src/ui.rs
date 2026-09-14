@@ -35,6 +35,7 @@ pub struct PanelState<'a> {
     pub effect_index: &'a mut usize,
     pub knob: &'a mut f32,
     pub knob_manual: &'a mut bool,
+    pub freeze: &'a mut bool,
     pub mirror: &'a mut bool,
     pub show_skeleton: &'a mut bool,
     pub show_outline: &'a mut bool,
@@ -132,7 +133,7 @@ fn draw_panel(ctx: &Context, panel: &mut PanelState<'_>) {
 
             ui.separator();
             ui.label(
-                egui::RichText::new("h hides this panel · esc quits")
+                egui::RichText::new("h hides this panel · f freezes the zone · esc quits")
                     .small()
                     .weak(),
             );
@@ -172,6 +173,8 @@ fn effect_section(ui: &mut egui::Ui, panel: &mut PanelState<'_>) {
 
 fn display_section(ui: &mut egui::Ui, panel: &mut PanelState<'_>) {
     ui.heading("display");
+    ui.checkbox(panel.freeze, "freeze zone (f)")
+        .on_hover_text("hold the zone in place while the hands move away");
     ui.checkbox(panel.mirror, "mirror preview");
     ui.checkbox(panel.show_skeleton, "hand skeleton");
     ui.checkbox(panel.show_outline, "region outline");

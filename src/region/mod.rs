@@ -106,6 +106,23 @@ impl Region {
     }
 }
 
+/// Resolve which region to draw, honouring a freeze request.
+///
+/// Freezing latches the region as it was at the moment it was requested, so
+/// the effect stays put while the hands move away or drop out of frame. A
+/// freeze asked for while no region is live is held pending rather than
+/// discarded — the moment a region appears, it latches.
+pub fn resolve(live: Region, latched: &mut Option<Region>, freeze: bool) -> Region {
+    if !freeze {
+        *latched = None;
+        return live;
+    }
+    if latched.is_none() && live.is_active() {
+        *latched = Some(live);
+    }
+    latched.unwrap_or(live)
+}
+
 pub trait RegionSource: Send {
     fn name(&self) -> &str;
     fn region(&self, frame: &HandFrame) -> Region;
@@ -168,6 +185,63 @@ mod tests {
             landmarks,
             score: 1.0,
         }
+    }
+
+    fn square(offset: f32) -> Region {
+        Region::quad([
+            Vec2::new(0.1 + offset, 0.1),
+            Vec2::new(0.9 + offset, 0.1),
+            Vec2::new(0.9 + offset, 0.9),
+            Vec2::new(0.1 + offset, 0.9),
+        ])
+    }
+
+    #[test]
+    fn unfrozen_follows_the_live_region() {
+        let mut latched = None;
+        let a = resolve(square(0.0), &mut latched, false);
+        let b = resolve(square(0.5), &mut latched, false);
+        assert_ne!(a, b, "should track the hands when not frozen");
+        assert!(latched.is_none());
+    }
+
+    #[test]
+    fn freezing_latches_the_region_in_place() {
+        let mut latched = None;
+        let frozen = resolve(square(0.0), &mut latched, true);
+        // The hands move; the drawn region must not.
+        let after = resolve(square(0.5), &mut latched, true);
+        assert_eq!(frozen, after, "frozen region moved with the hands");
+    }
+
+    #[test]
+    fn frozen_region_survives_losing_the_hands() {
+        let mut latched = None;
+        let frozen = resolve(square(0.0), &mut latched, true);
+        let after = resolve(Region::None, &mut latched, true);
+        assert_eq!(frozen, after, "frozen region vanished when hands were lost");
+        assert!(after.is_active());
+    }
+
+    #[test]
+    fn unfreezing_returns_to_the_live_region() {
+        let mut latched = None;
+        resolve(square(0.0), &mut latched, true);
+        let live = resolve(square(0.5), &mut latched, false);
+        assert_eq!(live, square(0.5));
+        assert!(latched.is_none(), "latch must be released");
+    }
+
+    #[test]
+    fn freezing_with_no_region_latches_once_one_appears() {
+        let mut latched = None;
+        // Asked for with no hands up: nothing to latch yet.
+        assert_eq!(resolve(Region::None, &mut latched, true), Region::None);
+        assert!(latched.is_none());
+        // Hands appear — now it latches.
+        let latched_region = resolve(square(0.2), &mut latched, true);
+        assert_eq!(latched_region, square(0.2));
+        assert_eq!(resolve(square(0.9), &mut latched, true), square(0.2));
     }
 
     #[test]
