@@ -86,6 +86,9 @@ pub struct Renderer {
     overlay: Overlay,
 
     egui: egui_wgpu::Renderer,
+    /// Kept so the camera texture can be rebuilt when the resolution changes.
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     camera_texture: wgpu::Texture,
     camera_size: (u32, u32),
     /// Last camera frame uploaded, so we skip redundant transfers.
@@ -264,6 +267,8 @@ impl Renderer {
             pipelines,
             overlay,
             egui,
+            bind_group_layout: layout,
+            sampler,
             camera_texture,
             camera_size,
             last_uploaded: 0,
@@ -282,17 +287,63 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
+    /// Recreate the camera texture and its bind group at a new size.
+    ///
+    /// The bind group holds a view of the old texture, so both must be
+    /// replaced together — keeping the layout and sampler around is what makes
+    /// that cheap enough to do mid-stream.
+    fn rebuild_camera_texture(&mut self, width: u32, height: u32) {
+        self.camera_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("camera"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = self.camera_texture.create_view(&Default::default());
+        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("effect-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.globals.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.camera_size = (width, height);
+        // Force the next upload: the new texture has no contents yet.
+        self.last_uploaded = 0;
+    }
+
     fn upload_camera(&mut self, frame: &Frame) {
         if frame.seq == self.last_uploaded {
             return;
         }
         if (frame.width, frame.height) != self.camera_size {
-            log::warn!(
-                "camera resolution changed to {}x{}; ignoring frame",
+            // The capture thread can change resolution at runtime, so resize
+            // to match rather than dropping the frame.
+            log::info!(
+                "camera resolution changed to {}x{}; resizing texture",
                 frame.width,
                 frame.height
             );
-            return;
+            self.rebuild_camera_texture(frame.width, frame.height);
         }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {

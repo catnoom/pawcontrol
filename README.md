@@ -17,6 +17,7 @@ cargo run --release
 | Flag | Meaning |
 | --- | --- |
 | `--camera N` | use capture device N (default: first non-virtual device) |
+| | (resolution is changed from the control panel, not the CLI) |
 | `--list-cameras` | print detected devices and exit |
 | `--selftest` | verify the models and GPU backend without opening the camera |
 
@@ -47,8 +48,14 @@ hand landmarks:    2.4 ms
 Press `h` for an on-screen panel covering every runtime tunable: effect
 selection and each effect's own parameters, the intensity knob (with a manual
 override for the gesture), outline colour and width, gesture thresholds and
-debounce, and the tracking settings — hand limit, confidence thresholds,
-re-detection interval and the One Euro smoothing constants.
+debounce, the camera resolution, and the tracking settings — hand limit,
+confidence thresholds, re-detection interval and the One Euro smoothing
+constants.
+
+The resolution list comes from the device itself, so it only offers modes the
+camera actually supports. Switching restarts the capture stream and resizes the
+GPU texture; the panel reports the resolution the driver settled on, which is
+not always the one requested.
 
 Components declare their own knobs by returning `Tunable`s, so a new effect or
 gesture gets panel controls without touching the UI code:

@@ -8,6 +8,7 @@ use egui::{Context, ViewportId};
 use winit::event::WindowEvent;
 use winit::window::Window;
 
+use crate::camera::CameraHandle;
 use crate::effect::Effect;
 use crate::gesture::GestureEngine;
 use crate::settings::{Shared, TrackingSettings};
@@ -41,6 +42,7 @@ pub struct PanelState<'a> {
     pub outline_width: &'a mut f32,
     pub gestures: &'a mut GestureEngine,
     pub tracking: &'a Shared<TrackingSettings>,
+    pub camera: &'a CameraHandle,
     pub stats: Stats,
 }
 
@@ -124,6 +126,8 @@ fn draw_panel(ctx: &Context, panel: &mut PanelState<'_>) {
             ui.separator();
             gesture_section(ui, panel);
             ui.separator();
+            camera_section(ui, panel);
+            ui.separator();
             tracking_section(ui, panel);
 
             ui.separator();
@@ -185,6 +189,45 @@ fn gesture_section(ui: &mut egui::Ui, panel: &mut PanelState<'_>) {
             ui.add(egui::Slider::new(t.value, t.min..=t.max).text(t.label));
         }
     }
+}
+
+fn camera_section(ui: &mut egui::Ui, panel: &mut PanelState<'_>) {
+    ui.heading("camera");
+    let state = panel.camera.state();
+    let (w, h) = state.current;
+
+    // Fall back to the current mode alone if the device would not enumerate.
+    let options: Vec<(u32, u32)> = if state.available.is_empty() {
+        vec![(w, h)]
+    } else {
+        state.available.clone()
+    };
+
+    let mut chosen = (w, h);
+    egui::ComboBox::from_label("resolution")
+        .selected_text(format!("{w} x {h}"))
+        .show_ui(ui, |ui| {
+            for option in &options {
+                ui.selectable_value(
+                    &mut chosen,
+                    *option,
+                    format!("{} x {}", option.0, option.1),
+                );
+            }
+        });
+    // Requesting the mode already in use would pointlessly restart the stream.
+    if chosen != (w, h) {
+        panel.camera.set_resolution(chosen.0, chosen.1);
+    }
+
+    if let Some(err) = &state.last_error {
+        ui.colored_label(egui::Color32::from_rgb(220, 120, 90), err);
+    }
+    ui.label(
+        egui::RichText::new("switching restarts the capture stream")
+            .small()
+            .weak(),
+    );
 }
 
 fn tracking_section(ui: &mut egui::Ui, panel: &mut PanelState<'_>) {

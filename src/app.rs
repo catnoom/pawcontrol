@@ -10,7 +10,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::camera::{self, CameraConfig, FrameBus};
+use crate::camera::{self, CameraConfig, CameraHandle, FrameBus};
 use crate::effect::{self, Effect, EffectCtx};
 use crate::gesture::{FingerTouch, GestureEngine, GestureEvent, HandCount};
 use crate::region::{RegionSource, TwoHandQuad};
@@ -34,6 +34,8 @@ pub struct App {
 
     bus: Arc<FrameBus>,
     hands: HandSlot,
+    camera: CameraHandle,
+    /// Size the window was created at; the live size comes from the frames.
     camera_size: (u32, u32),
 
     effects: Vec<Box<dyn Effect>>,
@@ -69,8 +71,8 @@ impl App {
             index: options.camera.unwrap_or_else(camera::auto_index),
             ..Default::default()
         };
-        let camera_size = camera::spawn(cfg, bus.clone())
-            .context("starting camera capture")?;
+        let camera = camera::spawn(cfg, bus.clone()).context("starting camera capture")?;
+        let camera_size = camera.state().current;
 
         let hands: HandSlot = Arc::new(Mutex::new(Arc::new(HandFrame::default())));
         let tracking = settings::shared(TrackingSettings::default());
@@ -90,6 +92,7 @@ impl App {
             renderer: None,
             bus,
             hands,
+            camera,
             camera_size,
             effects,
             effect_index: 0,
@@ -253,6 +256,7 @@ impl App {
                         outline_width: &mut self.outline_width,
                         gestures: &mut self.gestures,
                         tracking: &self.tracking,
+                        camera: &self.camera,
                         stats,
                     },
                 ))
