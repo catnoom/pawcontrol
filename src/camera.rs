@@ -39,18 +39,58 @@ impl FrameBus {
 /// A request to the capture thread. The camera device is not `Send`, so it
 /// can only be reconfigured from inside its own thread.
 pub enum CameraCommand {
-    SetResolution(u32, u32),
+    /// Carries the whole format triple, not just a size: a webcam mode is
+    /// (resolution, pixel format, frame rate) and only complete triples it
+    /// advertises are accepted.
+    SetFormat(CameraFormat),
 }
 
 /// What the control panel needs to know about the camera.
 #[derive(Clone, Debug, Default)]
 pub struct CameraState {
-    /// Resolutions the device reports it supports, de-duplicated and sorted.
-    pub available: Vec<(u32, u32)>,
+    /// Every mode the device advertises, sorted by pixel count then frame rate.
+    pub available: Vec<CameraFormat>,
     /// The resolution actually in use — the driver may not honour a request.
     pub current: (u32, u32),
-    /// Set when the last resolution change was rejected.
+    /// The full mode in use, for display.
+    pub current_format: Option<CameraFormat>,
+    /// Set when the last change was rejected.
     pub last_error: Option<String>,
+}
+
+impl CameraState {
+    /// Distinct resolutions, for the panel's dropdown.
+    pub fn resolutions(&self) -> Vec<(u32, u32)> {
+        let mut out: Vec<(u32, u32)> = self
+            .available
+            .iter()
+            .map(|f| (f.resolution().width_x, f.resolution().height_y))
+            .collect();
+        out.sort_unstable_by_key(|(w, h)| (*w as u64) * (*h as u64));
+        out.dedup();
+        out
+    }
+}
+
+/// Pick the best advertised mode at a given resolution.
+///
+/// Preferring MJPEG matters: uncompressed modes (YUYV/NV12) are limited by USB
+/// bandwidth, so a webcam typically offers 1080p only as MJPEG. Asking for
+/// 1080p while holding the 640x480 pixel format is what produced
+/// "Failed to fulfill requested format".
+pub fn best_mode(available: &[CameraFormat], width: u32, height: u32) -> Option<CameraFormat> {
+    available
+        .iter()
+        .filter(|f| f.resolution().width_x == width && f.resolution().height_y == height)
+        .copied()
+        .max_by_key(|f| {
+            let mjpeg = f.format() == FrameFormat::MJPEG;
+            // Prefer the fastest mode that is still a sane capture rate;
+            // anything above 60 is ranked below it rather than chased.
+            let fps = f.frame_rate();
+            let rank = if fps <= 60 { fps } else { 0 };
+            (mjpeg, rank)
+        })
 }
 
 /// Handle to a running capture thread.
@@ -60,10 +100,23 @@ pub struct CameraHandle {
 }
 
 impl CameraHandle {
+    /// Request a resolution, resolved against the device's advertised modes.
     pub fn set_resolution(&self, width: u32, height: u32) {
-        // A dead capture thread is not fatal; the app keeps rendering the
-        // last frame, and the panel shows the error.
-        let _ = self.commands.send(CameraCommand::SetResolution(width, height));
+        let mode = {
+            let state = self.state.lock().unwrap();
+            best_mode(&state.available, width, height)
+        };
+        match mode {
+            Some(mode) => {
+                // A dead capture thread is not fatal; the app keeps rendering
+                // the last frame, and the panel shows the error.
+                let _ = self.commands.send(CameraCommand::SetFormat(mode));
+            }
+            None => {
+                self.state.lock().unwrap().last_error =
+                    Some(format!("{width}x{height} is not an advertised mode"));
+            }
+        }
     }
 
     pub fn state(&self) -> CameraState {
@@ -161,8 +214,9 @@ pub fn spawn(cfg: CameraConfig, bus: Arc<FrameBus>) -> Result<CameraHandle> {
             }
 
             let initial = CameraState {
-                available: supported_resolutions(&mut camera),
+                available: supported_modes(&mut camera),
                 current: (width, height),
+                current_format: Some(camera.camera_format()),
                 last_error: None,
             };
             log::info!("camera {} streaming at {width}x{height}", cfg.index);
@@ -184,22 +238,26 @@ pub fn spawn(cfg: CameraConfig, bus: Arc<FrameBus>) -> Result<CameraHandle> {
     })
 }
 
-/// Distinct resolutions the device advertises, sorted by pixel count.
+/// Every mode the device advertises, sorted by pixel count then frame rate.
 ///
 /// Returns an empty list if the query fails — the panel then falls back to
-/// showing only the current resolution rather than failing to open.
-fn supported_resolutions(camera: &mut Camera) -> Vec<(u32, u32)> {
-    let Ok(formats) = camera.compatible_camera_formats() else {
+/// showing only the current mode rather than failing to open.
+pub fn supported_modes(camera: &mut Camera) -> Vec<CameraFormat> {
+    let Ok(mut formats) = camera.compatible_camera_formats() else {
         log::warn!("could not enumerate camera formats");
         return Vec::new();
     };
-    let mut seen: Vec<(u32, u32)> = formats
-        .iter()
-        .map(|f| (f.resolution().width_x, f.resolution().height_y))
-        .collect();
-    seen.sort_unstable_by_key(|(w, h)| (*w as u64) * (*h as u64));
-    seen.dedup();
-    seen
+    formats.sort_unstable_by_key(|f| {
+        let r = f.resolution();
+        ((r.width_x as u64) * (r.height_y as u64), f.frame_rate())
+    });
+    formats
+}
+
+/// Open the camera briefly and report every mode it advertises.
+pub fn list_modes(cfg: &CameraConfig) -> Result<Vec<CameraFormat>> {
+    let mut camera = open(cfg)?;
+    Ok(supported_modes(&mut camera))
 }
 
 fn capture_loop(
@@ -214,8 +272,8 @@ fn capture_loop(
         // Apply any pending reconfiguration before grabbing the next frame.
         while let Ok(command) = commands.try_recv() {
             match command {
-                CameraCommand::SetResolution(w, h) => {
-                    apply_resolution(camera, w, h, state);
+                CameraCommand::SetFormat(mode) => {
+                    apply_format(camera, mode, state);
                     // The stream restarts underneath us; treat the next few
                     // reads as fresh rather than counting earlier failures.
                     failures = 0;
@@ -253,21 +311,33 @@ fn capture_loop(
     }
 }
 
-fn apply_resolution(camera: &mut Camera, w: u32, h: u32, state: &Arc<Mutex<CameraState>>) {
-    let result = camera.set_resolution(Resolution::new(w, h));
+fn apply_format(camera: &mut Camera, mode: CameraFormat, state: &Arc<Mutex<CameraState>>) {
+    // `set_camera_requset` resolves the request against the device's own list
+    // and reports back what it settled on. Ask for the exact advertised mode
+    // first, then fall back to the nearest match rather than giving up: a
+    // device can list a mode it will not actually grant.
+    let exact = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Exact(mode));
+    let result = match camera.set_camera_requset(exact) {
+        Ok(actual) => Ok(actual),
+        Err(exact_err) => {
+            log::debug!("exact mode {mode} refused ({exact_err}); trying closest");
+            let closest = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(mode));
+            camera.set_camera_requset(closest)
+        }
+    };
+
     let mut state = state.lock().unwrap();
     match result {
-        Ok(()) => {
-            // Trust the device over the request: it may have snapped to the
-            // nearest mode it actually supports.
-            let actual = camera.resolution();
-            state.current = (actual.width_x, actual.height_y);
+        Ok(actual) => {
+            let res = actual.resolution();
+            state.current = (res.width_x, res.height_y);
+            state.current_format = Some(actual);
             state.last_error = None;
-            log::info!("camera resolution now {}x{}", actual.width_x, actual.height_y);
+            log::info!("camera mode now {actual}");
         }
         Err(e) => {
-            log::warn!("camera rejected {w}x{h}: {e}");
-            state.last_error = Some(format!("{w}x{h} rejected: {e}"));
+            log::warn!("camera rejected {mode}: {e}");
+            state.last_error = Some(format!("{mode} rejected: {e}"));
         }
     }
 }

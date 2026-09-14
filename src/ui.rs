@@ -197,11 +197,10 @@ fn camera_section(ui: &mut egui::Ui, panel: &mut PanelState<'_>) {
     let (w, h) = state.current;
 
     // Fall back to the current mode alone if the device would not enumerate.
-    let options: Vec<(u32, u32)> = if state.available.is_empty() {
-        vec![(w, h)]
-    } else {
-        state.available.clone()
-    };
+    let mut options = state.resolutions();
+    if options.is_empty() {
+        options.push((w, h));
+    }
 
     let mut chosen = (w, h);
     egui::ComboBox::from_label("resolution")
@@ -222,6 +221,19 @@ fn camera_section(ui: &mut egui::Ui, panel: &mut PanelState<'_>) {
 
     if let Some(err) = &state.last_error {
         ui.colored_label(egui::Color32::from_rgb(220, 120, 90), err);
+    }
+    // Showing the pixel format matters: high resolutions are usually only
+    // offered as MJPEG, so this explains why a mode was or was not available.
+    if let Some(mode) = &state.current_format {
+        ui.label(
+            egui::RichText::new(format!(
+                "{:?} · {} fps",
+                mode.format(),
+                mode.frame_rate()
+            ))
+            .small()
+            .weak(),
+        );
     }
     ui.label(
         egui::RichText::new("switching restarts the capture stream")

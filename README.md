@@ -19,6 +19,7 @@ cargo run --release
 | `--camera N` | use capture device N (default: first non-virtual device) |
 | | (resolution is changed from the control panel, not the CLI) |
 | `--list-cameras` | print detected devices and exit |
+| `--list-modes` | print the camera's supported modes and exit |
 | `--selftest` | verify the models and GPU backend without opening the camera |
 
 Start with `--selftest`. It reports which execution provider actually loaded,
@@ -54,8 +55,14 @@ constants.
 
 The resolution list comes from the device itself, so it only offers modes the
 camera actually supports. Switching restarts the capture stream and resizes the
-GPU texture; the panel reports the resolution the driver settled on, which is
-not always the one requested.
+GPU texture; the panel reports the mode the driver settled on, which is not
+always the one requested.
+
+A webcam mode is a *triple* — resolution, pixel format and frame rate — not
+just a size. High resolutions are usually offered only as MJPEG, since
+uncompressed modes run out of USB bandwidth, so picking 1080p also means
+switching pixel format. The panel shows the format and frame rate in use, and
+`--list-modes` prints everything the device advertises.
 
 Components declare their own knobs by returning `Tunable`s, so a new effect or
 gesture gets panel controls without touching the UI code:

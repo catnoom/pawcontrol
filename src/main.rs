@@ -53,6 +53,29 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    if args.iter().any(|a| a == "--list-modes") {
+        let index = args
+            .iter()
+            .position(|a| a == "--camera")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or_else(camera::auto_index);
+        let cfg = camera::CameraConfig {
+            index,
+            ..Default::default()
+        };
+        println!("camera {index} advertises:");
+        for mode in camera::list_modes(&cfg)? {
+            println!(
+                "  {:>5} x {:<5}  {:>3} fps  {:?}",
+                mode.resolution().width_x,
+                mode.resolution().height_y,
+                mode.frame_rate(),
+                mode.format()
+            );
+        }
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--selftest") {
         return selftest();
     }
@@ -86,6 +109,7 @@ fn print_usage() {
          OPTIONS:\n\
          \x20 --camera N       use this capture device (default: first non-virtual)\n\
          \x20 --list-cameras   print detected capture devices and exit\n\
+         \x20 --list-modes     print the camera's supported modes and exit\n\
          \x20 --selftest       verify models and GPU backend, then exit\n\
          \x20 --help           show this message\n\n\
          CONTROLS:\n\
