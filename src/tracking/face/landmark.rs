@@ -15,17 +15,19 @@ pub const FACE_BOX_ENLARGE: f32 = 1.5;
 
 /// Decode the mesh into image-space pixels.
 ///
-/// `raw` is `[x, y, z] * 468` in crop-pixel coordinates.
+/// `raw` is `[x, y, z] * 468` in **normalized** crop coordinates: 0..1 across
+/// the crop, not crop pixels. (The hand landmark model emits pixels, so the
+/// two decoders differ here.)
 pub fn decode(raw: &[f32], roi: &Roi) -> Option<Vec<Vec2>> {
     if raw.len() < LANDMARK_COUNT * 3 {
         return None;
     }
     let crop = INPUT_SIZE as f32;
-    let half = crop * 0.5;
 
     let mut out = Vec::with_capacity(LANDMARK_COUNT);
     for i in 0..LANDMARK_COUNT {
-        let offset = Vec2::new(raw[i * 3] - half, raw[i * 3 + 1] - half);
+        // Normalized -> crop pixels relative to the crop centre.
+        let offset = Vec2::new(raw[i * 3] - 0.5, raw[i * 3 + 1] - 0.5) * crop;
         out.push(roi.center + roi.crop_offset_to_image(offset, crop));
     }
     Some(out)
@@ -35,17 +37,44 @@ pub fn decode(raw: &[f32], roi: &Roi) -> Option<Vec<Vec2>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn crop_centre_maps_to_roi_centre() {
-        let roi = Roi {
+    fn roi() -> Roi {
+        Roi {
             center: Vec2::new(320.0, 240.0),
             side: 192.0,
             angle: 0.0,
-        };
-        let raw = vec![96.0, 96.0, 0.0].repeat(LANDMARK_COUNT);
-        let pts = decode(&raw, &roi).unwrap();
+        }
+    }
+
+    #[test]
+    fn crop_centre_maps_to_roi_centre() {
+        // 0.5 is the centre in normalized crop space.
+        let raw = vec![0.5, 0.5, 0.0].repeat(LANDMARK_COUNT);
+        let pts = decode(&raw, &roi()).unwrap();
         assert_eq!(pts.len(), LANDMARK_COUNT);
-        assert!((pts[0] - roi.center).length() < 1e-4, "{:?}", pts[0]);
+        assert!((pts[0] - roi().center).length() < 1e-4, "{:?}", pts[0]);
+    }
+
+    #[test]
+    fn mesh_spans_the_crop_at_full_scale() {
+        // A point at the crop's right edge must land half a side away, not a
+        // fraction of a pixel: this is the scale the ratio-based eye tests
+        // cannot see.
+        let mut raw = vec![0.5, 0.5, 0.0].repeat(LANDMARK_COUNT);
+        raw[0] = 1.0; // landmark 0 at the right edge
+        raw[1] = 0.0; // and the top edge
+        let pts = decode(&raw, &roi()).unwrap();
+        let r = roi();
+        assert!(
+            (pts[0].x - (r.center.x + r.side * 0.5)).abs() < 1e-3,
+            "x landed at {} not {}",
+            pts[0].x,
+            r.center.x + r.side * 0.5
+        );
+        assert!(
+            (pts[0].y - (r.center.y - r.side * 0.5)).abs() < 1e-3,
+            "y landed at {}",
+            pts[0].y
+        );
     }
 
     #[test]

@@ -120,6 +120,10 @@ deliberate blink.
 Note that "right eye" follows MediaPipe's convention — the user's own right,
 which appears on the left of an unmirrored image.
 
+One trap worth recording: the face mesh emits **normalized** 0..1 crop
+coordinates, while the hand landmark model emits crop *pixels*. The two
+decoders differ for that reason.
+
 ### Hand tracking
 
 Two ONNX models, the standard MediaPipe pair, run through `ort` with the
@@ -185,7 +189,7 @@ resolve.
 cargo test
 ```
 
-55 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
+57 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
 gesture hysteresis, region convexity, the knob's curl calibration, and eye
 aspect ratio and blink timing. Two tests run against a real GPU device — one compiles every effect
 shader, the other drives the egui paint path — so rendering errors surface here

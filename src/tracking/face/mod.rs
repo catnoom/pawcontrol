@@ -94,6 +94,10 @@ pub struct FaceSettings {
     pub presence_threshold: f32,
     /// Frames between detection attempts while no face is tracked.
     pub redetect_interval: u64,
+    /// How much to enlarge the mesh's own bounding box when re-deriving the
+    /// crop for the next frame. Too tight and the mesh model degrades, which
+    /// shows up as tracking that flickers once per detection interval.
+    pub track_roi_scale: f32,
 }
 
 impl Default for FaceSettings {
@@ -103,6 +107,7 @@ impl Default for FaceSettings {
             detect_threshold: 0.6,
             presence_threshold: 0.4,
             redetect_interval: 6,
+            track_roi_scale: 1.4,
         }
     }
 }
@@ -142,7 +147,12 @@ impl FaceTracker {
         match self.run_landmarks(frame, &roi)? {
             Some((points, score)) if score >= settings.presence_threshold => {
                 // Re-seed the crop from the mesh so detection can stay idle.
-                self.roi = Some(Roi::enclosing(&points, 0.0, 1.25, Vec2::ZERO));
+                self.roi = Some(Roi::enclosing(
+                    &points,
+                    mesh_rotation(&points),
+                    settings.track_roi_scale,
+                    Vec2::ZERO,
+                ));
                 let size = frame.size();
                 Ok(FaceFrame {
                     faces: vec![Face {
@@ -221,6 +231,20 @@ impl FaceTracker {
 
         Ok(landmark::decode(raw, roi).map(|pts| (pts, score)))
     }
+}
+
+/// Roll of the mesh, from the outer eye corners.
+///
+/// Returned in `Roi`'s convention: the rect's local +x axis runs along the
+/// eye line, so the crop comes out upright.
+fn mesh_rotation(points: &[Vec2]) -> f32 {
+    const RIGHT_OUTER: usize = 33;
+    const LEFT_OUTER: usize = 263;
+    if points.len() <= LEFT_OUTER {
+        return 0.0;
+    }
+    let d = points[LEFT_OUTER] - points[RIGHT_OUTER];
+    d.y.atan2(d.x)
 }
 
 /// Letterbox the frame into a square NCHW buffer.
@@ -329,57 +353,92 @@ mod tests {
             );
         }
 
-        // The eyes must sit above the mouth, which pins the mesh orientation.
+        // The eyes must sit level on a frontal face, pinning orientation.
         let right = face.landmarks[eye::lm::RIGHT_EYE[0]];
         let left = face.landmarks[eye::lm::LEFT_EYE[3]];
         assert!(
             (right.y - left.y).abs() < 0.08,
             "eyes are not level on a frontal face: {right:?} {left:?}"
         );
+
+        // Absolute scale. The eye tests above are ratios, so they hold even if
+        // the whole mesh collapses to a dot — which is exactly the bug that
+        // slipped through once. These check the mesh is actually face-sized.
+        let eye_gap = right.distance(left);
+        assert!(
+            (0.05..0.60).contains(&eye_gap),
+            "inter-eye distance {eye_gap:.4} of frame width is not face-sized; \
+             the mesh is probably mis-scaled"
+        );
+
+        let min_x = face.landmarks.iter().map(|p| p.x).fold(f32::MAX, f32::min);
+        let max_x = face.landmarks.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+        let min_y = face.landmarks.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        let max_y = face.landmarks.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+        let (w, h) = (max_x - min_x, max_y - min_y);
+        println!("mesh spans {w:.3} x {h:.3} of the frame, eye gap {eye_gap:.3}");
+        assert!(
+            (0.08..0.95).contains(&w) && (0.08..0.95).contains(&h),
+            "mesh spans {w:.3}x{h:.3} of the frame, which is not a face"
+        );
     }
 
-    /// Probe both plausible input ranges and report which one detects a face.
+    /// Tracking must persist frame to frame, not flicker.
     ///
-    /// These exports ship without a reference implementation, so the scaling
-    /// is established by measurement rather than assumed.
+    /// The regression this guards: the mesh model emits *normalized* crop
+    /// coordinates, and decoding them as crop pixels collapsed every landmark
+    /// to a 2px blob. The next crop was then derived from that blob, so the
+    /// face was lost immediately and only reappeared when detection next ran
+    /// — one good frame per detection interval.
     #[test]
-    fn normalization_probe() {
+    fn tracking_persists_across_frames() {
         let _gpu = crate::test_support::gpu_lock();
         let Some(frame) = face_frame() else { return };
 
         let mut tracker = FaceTracker::new(true).expect("face models");
-        let size = detect::INPUT_SIZE;
-        let lb = Letterbox::fit_to(frame.width as usize, frame.height as usize, size);
+        let settings = FaceSettings::default();
 
-        for (label, mul, add) in [("0..1", 1.0f32, 0.0f32), ("-1..1", 2.0, -1.0)] {
-            let mut buf = Vec::new();
-            write_planar_letterbox(&frame, lb, size, mul, add, &mut buf);
-            let input =
-                Tensor::from_array(([1i64, 3, size as i64, size as i64], buf)).unwrap();
-            let outputs = tracker
-                .detector
-                .run(ort::inputs!["image" => input])
-                .expect("detector run");
-            let (_, b1) = outputs["box_coords_1"].try_extract_tensor::<f32>().unwrap();
-            let (_, s1) = outputs["box_scores_1"].try_extract_tensor::<f32>().unwrap();
-            let (_, b2) = outputs["box_coords_2"].try_extract_tensor::<f32>().unwrap();
-            let (_, s2) = outputs["box_scores_2"].try_extract_tensor::<f32>().unwrap();
-
-            let mut dets = Vec::new();
-            detect::decode_head(b1, s1, tracker.anchors.head(0), lb, 0.5, &mut dets);
-            detect::decode_head(b2, s2, tracker.anchors.head(1), lb, 0.5, &mut dets);
-            let best = dets.iter().map(|d| d.score).fold(0.0f32, f32::max);
-            let kept = super::super::nms::nms(dets, NMS_IOU, 4);
-            println!(
-                "range {label:>6}: {} detections, best score {best:.3}{}",
-                kept.len(),
-                kept.first()
-                    .map(|d| format!(
-                        ", box {:.0}x{:.0} at ({:.0},{:.0})",
-                        d.size.x, d.size.y, d.center.x, d.center.y
-                    ))
-                    .unwrap_or_default()
-            );
+        // The same still frame every time, so any loss is our own doing.
+        let mut pattern = String::new();
+        for _ in 0..30 {
+            let r = tracker.track(&frame, &settings).expect("tracking");
+            pattern.push(if r.first().is_some() { '#' } else { '.' });
         }
+        let tracked = pattern.matches('#').count();
+        println!("pattern: {pattern} ({tracked}/30)");
+
+        // Detection only runs every `redetect_interval` frames, so the opening
+        // gap is expected; everything after it must be continuous.
+        assert!(
+            tracked >= 24,
+            "tracking flickered: only {tracked}/30 frames held a face ({pattern})"
+        );
+        assert!(
+            !pattern.trim_start_matches('.').contains('.'),
+            "tracking dropped after acquiring: {pattern}"
+        );
+    }
+
+    /// The input scaling we settled on must still detect a face.
+    ///
+    /// These exports carry their own preprocessing, so 0..1 and -1..1 both
+    /// work; this pins the one actually in use rather than leaving it to
+    /// chance if the model is ever swapped.
+    #[test]
+    fn configured_normalization_detects() {
+        let _gpu = crate::test_support::gpu_lock();
+        let Some(frame) = face_frame() else { return };
+
+        let mut tracker = FaceTracker::new(true).expect("face models");
+        let settings = FaceSettings::default();
+        let roi = tracker
+            .detect(&frame, &settings)
+            .expect("detect")
+            .expect("a face at the configured input scaling");
+        // A face in this framing occupies a good fraction of the frame.
+        assert!(
+            (100.0..500.0).contains(&roi.side),
+            "implausible face crop: {roi:?}"
+        );
     }
 }
