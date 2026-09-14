@@ -41,8 +41,6 @@ struct Globals {
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
-@group(0) @binding(1) var cam_tex: texture_2d<f32>;
-@group(0) @binding(2) var cam_smp: sampler;
 
 struct Instance {
     @location(0) a: vec2<f32>,
