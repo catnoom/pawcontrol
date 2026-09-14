@@ -17,6 +17,7 @@ use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 
 use crate::frame::Frame;
+use crate::settings::{Shared, TrackingSettings};
 use filter::HandFilter;
 use hand::{Hand, HandFrame, LANDMARK_COUNT};
 use palm::{Anchors, Letterbox};
@@ -25,28 +26,18 @@ use roi::Roi;
 const PALM_MODEL: &[u8] = include_bytes!("../../assets/models/palm_detection.onnx");
 const LANDMARK_MODEL: &[u8] = include_bytes!("../../assets/models/hand_landmark.onnx");
 
-/// Below this landmark-model confidence we consider the hand lost and drop its
-/// ROI, forcing a fresh palm detection.
-const PRESENCE_THRESHOLD: f32 = 0.6;
-const PALM_SCORE_THRESHOLD: f32 = 0.5;
+/// NMS overlap for palm detection. Not exposed: it is a property of how the
+/// model was trained, not a preference.
 const PALM_NMS_IOU: f32 = 0.3;
 
-/// How often to re-run palm detection while we are short of hands. Every frame
-/// would be wasteful; this still reacquires a hand within ~100ms.
-const REDETECT_INTERVAL: u64 = 4;
-
 pub struct TrackerConfig {
-    pub max_hands: usize,
     /// Try the GPU (DirectML) first, falling back to CPU automatically.
     pub use_gpu: bool,
 }
 
 impl Default for TrackerConfig {
     fn default() -> Self {
-        Self {
-            max_hands: 2,
-            use_gpu: true,
-        }
+        Self { use_gpu: true }
     }
 }
 
@@ -61,7 +52,7 @@ pub struct HandTracker {
     landmarks: Session,
     anchors: Anchors,
     tracks: Vec<Track>,
-    cfg: TrackerConfig,
+    settings: Shared<TrackingSettings>,
     /// Scratch buffers, reused every frame to keep the hot loop allocation-free.
     palm_input: Vec<f32>,
     crop_input: Vec<f32>,
@@ -98,7 +89,7 @@ fn try_build(model: &[u8], gpu: bool) -> Result<Session> {
 }
 
 impl HandTracker {
-    pub fn new(cfg: TrackerConfig) -> Result<Self> {
+    pub fn new(cfg: TrackerConfig, settings: Shared<TrackingSettings>) -> Result<Self> {
         let (palm, backend) =
             build_session(PALM_MODEL, cfg.use_gpu).context("loading palm detection model")?;
         // Keep both models on the same backend so we report one honest answer.
@@ -111,7 +102,7 @@ impl HandTracker {
             landmarks,
             anchors: Anchors::new(),
             tracks: Vec::new(),
-            cfg,
+            settings,
             palm_input: Vec::new(),
             crop_input: Vec::new(),
             seq: 0,
@@ -124,9 +115,17 @@ impl HandTracker {
     pub fn track(&mut self, frame: &Frame, dt: f32) -> Result<HandFrame> {
         self.seq += 1;
 
-        let short_of_hands = self.tracks.len() < self.cfg.max_hands;
-        if short_of_hands && self.seq % REDETECT_INTERVAL == 0 {
-            self.detect_palms(frame)?;
+        // Snapshot once per frame: the panel may edit these between frames,
+        // and we want one consistent view for the whole step.
+        let settings = *self.settings.lock().unwrap();
+
+        // Trim if the panel lowered the hand limit.
+        self.tracks.truncate(settings.max_hands);
+
+        let short_of_hands = self.tracks.len() < settings.max_hands;
+        let interval = settings.redetect_interval.max(1);
+        if short_of_hands && self.seq % interval == 0 {
+            self.detect_palms(frame, &settings)?;
         }
 
         let mut hands = Vec::with_capacity(self.tracks.len());
@@ -134,8 +133,8 @@ impl HandTracker {
 
         for mut track in std::mem::take(&mut self.tracks) {
             match self.run_landmarks(frame, &track.roi)? {
-                Some(mut hand) if hand.score >= PRESENCE_THRESHOLD => {
-                    track.filter.apply(&mut hand.landmarks, dt);
+                Some(mut hand) if hand.score >= settings.presence_threshold => {
+                    track.filter.apply(&mut hand.landmarks, dt, &settings.filter);
 
                     // Re-seed the next crop from the smoothed landmarks.
                     let px = to_pixels(&hand.landmarks, frame.size());
@@ -154,7 +153,7 @@ impl HandTracker {
     }
 
     /// Seed new tracks from palm detection, skipping palms we already track.
-    fn detect_palms(&mut self, frame: &Frame) -> Result<()> {
+    fn detect_palms(&mut self, frame: &Frame, settings: &TrackingSettings) -> Result<()> {
         let size = palm::INPUT_SIZE;
         let lb = Letterbox::fit(frame.width as usize, frame.height as usize);
 
@@ -189,11 +188,11 @@ impl HandTracker {
         let (_, boxes) = outputs["Identity"].try_extract_tensor::<f32>()?;
         let (_, scores) = outputs["Identity_1"].try_extract_tensor::<f32>()?;
 
-        let dets = palm::decode(boxes, scores, &self.anchors, lb, PALM_SCORE_THRESHOLD);
-        let dets = palm::nms(dets, PALM_NMS_IOU, self.cfg.max_hands);
+        let dets = palm::decode(boxes, scores, &self.anchors, lb, settings.palm_score_threshold);
+        let dets = palm::nms(dets, PALM_NMS_IOU, settings.max_hands);
 
         for det in dets {
-            if self.tracks.len() >= self.cfg.max_hands {
+            if self.tracks.len() >= settings.max_hands {
                 break;
             }
             // Ignore a palm that lands inside a hand we already follow.
@@ -254,8 +253,9 @@ impl HandTracker {
     /// Exists so the whole inference path — model loading, tensor layout,
     /// output names, execution provider — can be verified without a camera.
     pub fn probe(&mut self, frame: &Frame) -> Result<ProbeReport> {
+        let settings = *self.settings.lock().unwrap();
         let t0 = std::time::Instant::now();
-        self.detect_palms(frame)?;
+        self.detect_palms(frame, &settings)?;
         let palm_ms = t0.elapsed().as_secs_f32() * 1000.0;
         let palm_candidates = self.tracks.len();
 
@@ -341,11 +341,12 @@ mod tests {
     /// elsewhere cover each transform in isolation.
     #[test]
     fn tracks_a_hand_in_a_real_photo() {
+        let _gpu = crate::test_support::gpu_lock();
         let Some(source) = fixture() else { return };
         let frame = webcam_framing(&source);
 
         let mut tracker =
-            HandTracker::new(TrackerConfig::default()).expect("creating the tracker");
+            HandTracker::new(TrackerConfig::default(), crate::settings::shared(TrackingSettings::default())).expect("creating the tracker");
 
         // Palm detection only runs on some frames, so step until it engages.
         let mut found = None;
@@ -399,6 +400,7 @@ mod tests {
     /// error there still "works" at 0 degrees and collapses off-axis.
     #[test]
     fn rotation_sweep() {
+        let _gpu = crate::test_support::gpu_lock();
         let Some(source) = fixture() else { return };
 
         for deg in [0i32, 30, 60, 90, 120, 150, 180, 240, 300] {
@@ -429,7 +431,7 @@ mod tests {
                 }
             }
 
-            let mut tracker = HandTracker::new(TrackerConfig::default()).unwrap();
+            let mut tracker = HandTracker::new(TrackerConfig::default(), crate::settings::shared(TrackingSettings::default())).unwrap();
             let mut best = 0.0f32;
             let mut hands = 0;
             for _ in 0..12 {
@@ -454,10 +456,11 @@ mod tests {
     /// intensity knob.
     #[test]
     fn open_palm_reads_as_extended() {
+        let _gpu = crate::test_support::gpu_lock();
         let Some(source) = fixture() else { return };
         let frame = webcam_framing(&source);
 
-        let mut tracker = HandTracker::new(TrackerConfig::default()).unwrap();
+        let mut tracker = HandTracker::new(TrackerConfig::default(), crate::settings::shared(TrackingSettings::default())).unwrap();
         for _ in 0..12 {
             let r = tracker.track(&frame, 1.0 / 30.0).unwrap();
             if let Some(h) = r.hands.first() {

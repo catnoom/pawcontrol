@@ -11,7 +11,30 @@ mod frame;
 mod gesture;
 mod region;
 mod render;
+mod settings;
 mod tracking;
+mod ui;
+
+#[cfg(test)]
+mod test_support {
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serializes tests that drive the GPU.
+    ///
+    /// Several tests each stand up their own device — two create a wgpu
+    /// device, three create DirectML ONNX sessions. Running those together on
+    /// one adapter reliably trips a device reset
+    /// (`DXGI_ERROR_DEVICE_REMOVED`). That is an artifact of the harness, not
+    /// the app: at runtime there is exactly one wgpu device and one pair of
+    /// sessions, never several being built at once.
+    static GPU: Mutex<()> = Mutex::new(());
+
+    /// Poisoning is ignored: a panicking GPU test should fail on its own
+    /// assertion, not cascade into every other test.
+    pub fn gpu_lock() -> MutexGuard<'static, ()> {
+        GPU.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 use anyhow::Result;
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -68,6 +91,7 @@ fn print_usage() {
          CONTROLS:\n\
          \x20 thumb + pinky    cycle effect (or press space)\n\
          \x20 curl middle      dial intensity (only while the window is up)\n\
+         \x20 h                show/hide the control panel\n\
          \x20 d / o / m        toggle skeleton / outline / mirror\n\
          \x20 esc              quit"
     );
@@ -87,7 +111,10 @@ fn selftest() -> Result<()> {
     let mut probe_frame = Frame::new(640, 480);
     probe_frame.rgba.fill(128);
 
-    let mut tracker = HandTracker::new(TrackerConfig::default())?;
+    let mut tracker = HandTracker::new(
+        TrackerConfig::default(),
+        settings::shared(settings::TrackingSettings::default()),
+    )?;
     // First pass includes lazy allocation; report a warm one.
     let _ = tracker.probe(&probe_frame)?;
     let report = tracker.probe(&probe_frame)?;

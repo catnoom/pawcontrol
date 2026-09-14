@@ -3,6 +3,7 @@
 //! Detectors are independent and stateful. Add a feature by implementing
 //! `GestureDetector` and pushing it into the `GestureEngine`.
 
+use crate::settings::Tunable;
 use crate::tracking::hand::{Finger, HandFrame};
 
 /// Something a hand did. Consumers match on this to drive behaviour.
@@ -19,6 +20,10 @@ pub enum GestureEvent {
 pub trait GestureDetector: Send {
     fn name(&self) -> &str;
     fn update(&mut self, frame: &HandFrame, dt: f32, out: &mut Vec<GestureEvent>);
+    /// Knobs this detector offers the control panel. Default: none.
+    fn tunables(&mut self) -> Vec<Tunable<'_>> {
+        Vec::new()
+    }
 }
 
 /// Runs every detector over each frame and collects their events.
@@ -39,6 +44,24 @@ impl GestureEngine {
         log::debug!("gesture detector registered: {}", d.name());
         self.detectors.push(Box::new(d));
         self
+    }
+
+    /// Every detector's tunables, for the control panel.
+    pub fn tunables(&mut self) -> Vec<(&'static str, Vec<Tunable<'_>>)> {
+        self.detectors
+            .iter_mut()
+            .map(|d| {
+                // `name` borrows immutably and `tunables` mutably, so resolve
+                // the name to a 'static str first.
+                let name: &'static str = match d.name() {
+                    "finger-touch" => "finger touch",
+                    "hand-count" => "hand count",
+                    _ => "detector",
+                };
+                (name, d.tunables())
+            })
+            .filter(|(_, t)| !t.is_empty())
+            .collect()
     }
 
     pub fn update(&mut self, frame: &HandFrame, dt: f32) -> &[GestureEvent] {
@@ -93,6 +116,14 @@ impl FingerTouch {
 impl GestureDetector for FingerTouch {
     fn name(&self) -> &str {
         "finger-touch"
+    }
+
+    fn tunables(&mut self) -> Vec<Tunable<'_>> {
+        vec![
+            Tunable::new("touch enter (palm widths)", &mut self.enter, 0.05, 1.0),
+            Tunable::new("touch exit (palm widths)", &mut self.exit, 0.05, 1.5),
+            Tunable::new("debounce (s)", &mut self.cooldown_secs, 0.0, 2.0),
+        ]
     }
 
     fn update(&mut self, frame: &HandFrame, dt: f32, out: &mut Vec<GestureEvent>) {

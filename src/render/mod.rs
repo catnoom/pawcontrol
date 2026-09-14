@@ -10,6 +10,7 @@ use winit::window::Window;
 use crate::effect::Effect;
 use crate::frame::Frame;
 use crate::region::Region;
+use crate::ui::UiOutput;
 use overlay::{LineInstance, Overlay};
 
 const PRELUDE_HEAD: &str = include_str!("../../assets/shaders/prelude_head.wgsl");
@@ -31,19 +32,6 @@ pub struct Globals {
     pub flags: [f32; 4],
 }
 
-impl Default for Globals {
-    fn default() -> Self {
-        Self {
-            quad_a: [0.0; 4],
-            quad_b: [0.0; 4],
-            view: [1.0, 1.0, 0.0, 0.0],
-            params: [0.0; 4],
-            outline: [1.0, 1.0, 1.0, 1.2],
-            flags: [1.0, 1.0, 0.0, 0.0],
-        }
-    }
-}
-
 /// What the renderer needs to draw one frame.
 pub struct RenderInput<'a> {
     pub frame: Option<&'a Frame>,
@@ -53,6 +41,10 @@ pub struct RenderInput<'a> {
     pub time: f32,
     pub mirror: bool,
     pub show_outline: bool,
+    pub outline_color: [f32; 3],
+    pub outline_width: f32,
+    /// Control panel geometry for this frame, if the panel is showing.
+    pub ui: Option<UiOutput>,
     /// Debug skeleton segments, in normalized screen space.
     pub lines: &'a [LineInstance],
 }
@@ -68,6 +60,7 @@ pub struct Renderer {
     pipelines: Vec<wgpu::RenderPipeline>,
     overlay: Overlay,
 
+    egui: egui_wgpu::Renderer,
     camera_texture: wgpu::Texture,
     camera_size: (u32, u32),
     /// Last camera frame uploaded, so we skip redundant transfers.
@@ -234,6 +227,7 @@ impl Renderer {
         }
 
         let overlay = Overlay::new(&device, &layout, format);
+        let egui = egui_wgpu::Renderer::new(&device, format, Default::default());
 
         Ok(Self {
             surface,
@@ -244,6 +238,7 @@ impl Renderer {
             bind_group,
             pipelines,
             overlay,
+            egui,
             camera_texture,
             camera_size,
             last_uploaded: 0,
@@ -315,7 +310,12 @@ impl Renderer {
                 if input.region.is_active() { 1.0 } else { 0.0 },
             ],
             params: input.params,
-            outline: [1.0, 1.0, 1.0, 1.2],
+            outline: [
+                input.outline_color[0],
+                input.outline_color[1],
+                input.outline_color[2],
+                input.outline_width,
+            ],
             flags: [
                 if input.mirror { 1.0 } else { 0.0 },
                 if input.show_outline { 1.0 } else { 0.0 },
@@ -353,6 +353,26 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame"),
             });
+
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: input.ui.as_ref().map_or(1.0, |u| u.pixels_per_point),
+        };
+        if let Some(ui) = &input.ui {
+            // Each id can carry several partial updates in one frame.
+            for (id, deltas) in &ui.textures_delta.set {
+                for delta in deltas {
+                    self.egui.update_texture(&self.device, &self.queue, *id, delta);
+                }
+            }
+            self.egui.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &ui.primitives,
+                &screen,
+            );
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("effect"),
@@ -379,6 +399,19 @@ impl Renderer {
             }
 
             self.overlay.draw(&mut pass, &self.bind_group);
+
+            if let Some(ui) = &input.ui {
+                // egui wants a 'static pass; the borrow is still confined to
+                // this block, so forgetting the lifetime is safe here.
+                let mut pass = pass.forget_lifetime();
+                self.egui.render(&mut pass, &ui.primitives, &screen);
+            }
+        }
+
+        if let Some(ui) = &input.ui {
+            for id in &ui.textures_delta.free {
+                self.egui.free_texture(id);
+            }
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -437,6 +470,7 @@ mod tests {
     /// `cargo test` instead. Skips if the machine has no usable GPU adapter.
     #[test]
     fn every_effect_shader_compiles() {
+        let _gpu = crate::test_support::gpu_lock();
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
@@ -502,11 +536,115 @@ mod tests {
             }
         }
 
-        // The overlay shader ships separately from the effect prelude.
+
+    // The overlay shader ships separately from the effect prelude.
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let _overlay = Overlay::new(&device, &layout, wgpu::TextureFormat::Rgba8UnormSrgb);
         if let Some(err) = pollster::block_on(scope.pop()) {
             panic!("overlay shader failed to compile:\n{err}");
+        }
+    }
+
+    /// Drive the egui paint path against a real device.
+    ///
+    /// The panel is only visible when the window opens, so this exercises the
+    /// exact call sequence `render()` uses — texture upload, buffer update,
+    /// draw — and fails on any validation error, rather than leaving a broken
+    /// overlay to be discovered by eye.
+    #[test]
+    fn egui_paint_path_is_valid() {
+        let _gpu = crate::test_support::gpu_lock();
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("egui-test"),
+            ..Default::default()
+        }))
+        .expect("requesting a device");
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut egui_renderer = egui_wgpu::Renderer::new(&device, format, Default::default());
+
+        // Build a frame containing real widgets, so glyph atlases are uploaded.
+        // `screen_rect` is required: without it egui has no viewport to lay
+        // out in and emits nothing. A window also needs a second pass, since
+        // the first only measures its contents.
+        let ctx = egui::Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(256.0, 256.0),
+            )),
+            ..Default::default()
+        };
+        let build = |ui: &mut egui::Ui| {
+            let ctx = ui.ctx().clone();
+            egui::Window::new("test").show(&ctx, |ui| {
+                ui.label("hello");
+                let mut v = 0.5f32;
+                ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("knob"));
+            });
+        };
+        ctx.run_ui(input(), build).textures_delta.clear();
+        let output = ctx.run_ui(input(), build);
+        let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("target"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [256, 256],
+            pixels_per_point: output.pixels_per_point,
+        };
+
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        for (id, deltas) in &output.textures_delta.set {
+            for delta in deltas {
+                egui_renderer.update_texture(&device, &queue, *id, delta);
+            }
+        }
+        assert!(!primitives.is_empty(), "egui produced no geometry to draw");
+        egui_renderer.update_buffers(&device, &queue, &mut encoder, &primitives, &screen);
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let mut pass = pass.forget_lifetime();
+            egui_renderer.render(&mut pass, &primitives, &screen);
+        }
+        queue.submit(Some(encoder.finish()));
+        if let Some(err) = pollster::block_on(scope.pop()) {
+            panic!("egui paint path produced a validation error:\n{err}");
         }
     }
 }

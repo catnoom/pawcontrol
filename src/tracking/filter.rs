@@ -83,22 +83,27 @@ impl OneEuro {
 #[derive(Debug, Clone)]
 pub struct HandFilter {
     joints: [OneEuro; super::hand::LANDMARK_COUNT],
-    cfg: OneEuroConfig,
 }
 
 impl Default for HandFilter {
     fn default() -> Self {
         Self {
             joints: [OneEuro::default(); super::hand::LANDMARK_COUNT],
-            cfg: OneEuroConfig::default(),
         }
     }
 }
 
 impl HandFilter {
-    pub fn apply(&mut self, landmarks: &mut [Vec3; super::hand::LANDMARK_COUNT], dt: f32) {
+    /// The config is passed per call rather than stored, so the control panel
+    /// can retune smoothing without rebuilding every tracked hand's filter.
+    pub fn apply(
+        &mut self,
+        landmarks: &mut [Vec3; super::hand::LANDMARK_COUNT],
+        dt: f32,
+        cfg: &OneEuroConfig,
+    ) {
         for (j, p) in self.joints.iter_mut().zip(landmarks.iter_mut()) {
-            *p = j.filter(*p, dt, &self.cfg);
+            *p = j.filter(*p, dt, cfg);
         }
     }
 

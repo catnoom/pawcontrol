@@ -16,6 +16,8 @@ use crate::gesture::{FingerTouch, GestureEngine, GestureEvent, HandCount};
 use crate::region::{RegionSource, TwoHandQuad};
 use crate::render::overlay::LineInstance;
 use crate::render::{RenderInput, Renderer};
+use crate::settings::{self, Shared, TrackingSettings};
+use crate::ui::{PanelState, Stats, Ui};
 use crate::tracking::hand::{Finger, HandFrame, BONES};
 use crate::tracking::{HandTracker, TrackerConfig};
 
@@ -42,6 +44,14 @@ pub struct App {
     mirror: bool,
     show_skeleton: bool,
     show_outline: bool,
+    outline_color: [f32; 3],
+    outline_width: f32,
+    /// When set, the intensity slider wins over middle-finger curl.
+    knob_manual: bool,
+    tracking: Shared<TrackingSettings>,
+    ui: Option<Ui>,
+    /// Smoothed frame rate for the panel readout.
+    fps: f32,
 
     start: Instant,
     last_frame: Instant,
@@ -63,7 +73,8 @@ impl App {
             .context("starting camera capture")?;
 
         let hands: HandSlot = Arc::new(Mutex::new(Arc::new(HandFrame::default())));
-        spawn_tracking(bus.clone(), hands.clone());
+        let tracking = settings::shared(TrackingSettings::default());
+        spawn_tracking(bus.clone(), hands.clone(), tracking.clone());
 
         let effects = effect::registry();
         let region_source: Box<dyn RegionSource> = Box::new(TwoHandQuad::default());
@@ -90,6 +101,12 @@ impl App {
             mirror: true,
             show_skeleton: false,
             show_outline: true,
+            outline_color: [1.0, 1.0, 1.0],
+            outline_width: 1.2,
+            knob_manual: false,
+            tracking,
+            ui: None,
+            fps: 0.0,
             start: Instant::now(),
             last_frame: Instant::now(),
             fps_counter: (0, Instant::now()),
@@ -186,7 +203,9 @@ impl App {
 
         // The knob only tracks while the window is actually up, so curling a
         // finger with no region showing leaves the setting untouched.
-        self.knob = effect::update_knob(self.knob, &hands, region.is_active());
+        if !self.knob_manual {
+            self.knob = effect::update_knob(self.knob, &hands, region.is_active());
+        }
 
         let params = {
             let ctx = EffectCtx {
@@ -198,7 +217,49 @@ impl App {
 
         self.build_lines(&hands);
 
+        // Smoothed so the readout is steady enough to read.
+        if dt > 0.0 {
+            let instant = 1.0 / dt;
+            self.fps = if self.fps == 0.0 {
+                instant
+            } else {
+                self.fps * 0.9 + instant * 0.1
+            };
+        }
+
         let frame = self.bus.latest();
+
+        // Build the panel before borrowing the renderer mutably.
+        let ui_output = match (self.ui.as_mut(), self.window.as_ref(), self.renderer.as_ref()) {
+            (Some(ui), Some(window), Some(renderer)) => {
+                let stats = Stats {
+                    fps: self.fps,
+                    hands: hands.hands.len(),
+                    region_active: region.is_active(),
+                    adapter: renderer.adapter_name.clone(),
+                    inference_backend: renderer.backend.clone(),
+                };
+                Some(ui.run(
+                    window,
+                    PanelState {
+                        effects: &mut self.effects,
+                        effect_index: &mut self.effect_index,
+                        knob: &mut self.knob,
+                        knob_manual: &mut self.knob_manual,
+                        mirror: &mut self.mirror,
+                        show_skeleton: &mut self.show_skeleton,
+                        show_outline: &mut self.show_outline,
+                        outline_color: &mut self.outline_color,
+                        outline_width: &mut self.outline_width,
+                        gestures: &mut self.gestures,
+                        tracking: &self.tracking,
+                        stats,
+                    },
+                ))
+            }
+            _ => None,
+        };
+
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
@@ -211,6 +272,9 @@ impl App {
             time,
             mirror: self.mirror,
             show_outline: self.show_outline,
+            outline_color: self.outline_color,
+            outline_width: self.outline_width,
+            ui: ui_output,
             lines: &self.lines,
         });
         if let Err(e) = result {
@@ -233,11 +297,11 @@ impl App {
     }
 }
 
-fn spawn_tracking(bus: Arc<FrameBus>, out: HandSlot) {
+fn spawn_tracking(bus: Arc<FrameBus>, out: HandSlot, settings: Shared<TrackingSettings>) {
     std::thread::Builder::new()
         .name("tracking".into())
         .spawn(move || {
-            let mut tracker = match HandTracker::new(TrackerConfig::default()) {
+            let mut tracker = match HandTracker::new(TrackerConfig::default(), settings) {
                 Ok(t) => t,
                 Err(e) => {
                     log::error!("hand tracking unavailable: {e:#}");
@@ -306,10 +370,19 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        self.ui = Some(Ui::new(&window));
         self.window = Some(window);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Let the panel claim clicks and keys aimed at it, so dragging a
+        // slider does not also toggle the mirror.
+        if let (Some(ui), Some(window)) = (self.ui.as_mut(), self.window.as_ref()) {
+            if ui.on_window_event(window, &event) && !matches!(event, WindowEvent::CloseRequested) {
+                return;
+            }
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -325,6 +398,11 @@ impl ApplicationHandler for App {
                     Key::Character("m") => self.mirror = !self.mirror,
                     Key::Character("d") => self.show_skeleton = !self.show_skeleton,
                     Key::Character("o") => self.show_outline = !self.show_outline,
+                    Key::Character("h") => {
+                        if let Some(ui) = self.ui.as_mut() {
+                            ui.open = !ui.open;
+                        }
+                    }
                     _ => {}
                 }
             }

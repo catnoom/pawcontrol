@@ -36,10 +36,31 @@ hand landmarks:    2.4 ms
 | thumb + pinky | next effect |
 | curl middle finger | intensity, 0 extended -> 1 fully curled (needs the window up) |
 | `space` | next effect (keyboard fallback) |
+| `h` | show/hide the control panel |
 | `d` | toggle the debug skeleton |
 | `o` | toggle the region outline |
 | `m` | toggle mirroring |
 | `esc` | quit |
+
+## Control panel
+
+Press `h` for an on-screen panel covering every runtime tunable: effect
+selection and each effect's own parameters, the intensity knob (with a manual
+override for the gesture), outline colour and width, gesture thresholds and
+debounce, and the tracking settings — hand limit, confidence thresholds,
+re-detection interval and the One Euro smoothing constants.
+
+Components declare their own knobs by returning `Tunable`s, so a new effect or
+gesture gets panel controls without touching the UI code:
+
+```rust
+fn tunables(&mut self) -> Vec<Tunable<'_>> {
+    vec![Tunable::new("block size", &mut self.block, 1.0, 64.0)]
+}
+```
+
+Tracking settings live behind a `Shared<TrackingSettings>` because tracking runs
+on its own thread; it re-reads them once per frame, so edits apply live.
 
 ## How it works
 
@@ -128,10 +149,10 @@ resolve.
 cargo test
 ```
 
-35 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
-gesture hysteresis, region convexity and the knob's curl calibration. One test compiles every effect shader
-on a real GPU device, so WGSL errors surface here rather than when the window
-opens. Two further tests run the full detection → crop → landmark chain against
+36 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
+gesture hysteresis, region convexity and the knob's curl calibration. Two tests run against a real GPU device — one compiles every effect
+shader, the other drives the egui paint path — so rendering errors surface here
+rather than when the window opens. Two further tests run the full detection → crop → landmark chain against
 a real photograph, including a sweep over hand orientations; they are skipped
 unless you point them at an image:
 

@@ -5,6 +5,7 @@
 //! and add a line to `registry()`.
 
 use crate::region::Region;
+use crate::settings::Tunable;
 use crate::tracking::hand::{Finger, HandFrame};
 
 /// The finger that drives the intensity knob.
@@ -56,6 +57,10 @@ pub trait Effect: Send {
     fn shader(&self) -> &'static str;
     /// Values exposed to the shader as `g.params`.
     fn params(&self, ctx: &EffectCtx) -> [f32; 4];
+    /// Knobs this effect offers the control panel. Default: none.
+    fn tunables(&mut self) -> Vec<Tunable<'_>> {
+        Vec::new()
+    }
 }
 
 /// Mosaic — the effect from the reference clip.
@@ -87,15 +92,25 @@ impl Effect for Pixelate {
         let k = ctx.knob();
         [self.min_block + (self.max_block - self.min_block) * k, 0.0, 0.0, 0.0]
     }
+    fn tunables(&mut self) -> Vec<Tunable<'_>> {
+        vec![
+            Tunable::new("block @ knob 0", &mut self.min_block, 1.0, 64.0),
+            Tunable::new("block @ knob 1", &mut self.max_block, 1.0, 160.0),
+        ]
+    }
 }
 
 pub struct Blur {
+    pub min_radius: f32,
     pub max_radius: f32,
 }
 
 impl Default for Blur {
     fn default() -> Self {
-        Self { max_radius: 10.0 }
+        Self {
+            min_radius: 2.0,
+            max_radius: 10.0,
+        }
     }
 }
 
@@ -108,12 +123,29 @@ impl Effect for Blur {
     }
     fn params(&self, ctx: &EffectCtx) -> [f32; 4] {
         let k = ctx.knob();
-        [2.0 + self.max_radius * k, 0.0, 0.0, 0.0]
+        [self.min_radius + self.max_radius * k, 0.0, 0.0, 0.0]
+    }
+    fn tunables(&mut self) -> Vec<Tunable<'_>> {
+        vec![
+            Tunable::new("radius @ knob 0", &mut self.min_radius, 0.0, 20.0),
+            Tunable::new("extra radius @ knob 1", &mut self.max_radius, 0.0, 40.0),
+        ]
     }
 }
 
-#[derive(Default)]
-pub struct RgbShift;
+pub struct RgbShift {
+    pub base: f32,
+    pub span: f32,
+}
+
+impl Default for RgbShift {
+    fn default() -> Self {
+        Self {
+            base: 3.0,
+            span: 33.0,
+        }
+    }
+}
 
 impl Effect for RgbShift {
     fn name(&self) -> &str {
@@ -124,12 +156,31 @@ impl Effect for RgbShift {
     }
     fn params(&self, ctx: &EffectCtx) -> [f32; 4] {
         let k = ctx.knob();
-        [3.0 + 33.0 * k, 0.0, 0.0, 0.0]
+        [self.base + self.span * k, 0.0, 0.0, 0.0]
+    }
+    fn tunables(&mut self) -> Vec<Tunable<'_>> {
+        vec![
+            Tunable::new("split @ knob 0", &mut self.base, 0.0, 40.0),
+            Tunable::new("extra split @ knob 1", &mut self.span, 0.0, 80.0),
+        ]
     }
 }
 
-#[derive(Default)]
-pub struct EdgeGlow;
+pub struct EdgeGlow {
+    pub base: f32,
+    pub span: f32,
+    pub hue_speed: f32,
+}
+
+impl Default for EdgeGlow {
+    fn default() -> Self {
+        Self {
+            base: 3.0,
+            span: 9.0,
+            hue_speed: 1.5,
+        }
+    }
+}
 
 impl Effect for EdgeGlow {
     fn name(&self) -> &str {
@@ -140,12 +191,32 @@ impl Effect for EdgeGlow {
     }
     fn params(&self, ctx: &EffectCtx) -> [f32; 4] {
         let k = ctx.knob();
-        [3.0 + 9.0 * k, 1.5, 0.0, 0.0]
+        [self.base + self.span * k, self.hue_speed, 0.0, 0.0]
+    }
+    fn tunables(&mut self) -> Vec<Tunable<'_>> {
+        vec![
+            Tunable::new("gain @ knob 0", &mut self.base, 0.0, 20.0),
+            Tunable::new("extra gain @ knob 1", &mut self.span, 0.0, 30.0),
+            Tunable::new("hue speed", &mut self.hue_speed, 0.0, 6.0),
+        ]
     }
 }
 
-#[derive(Default)]
-pub struct Swirl;
+pub struct Swirl {
+    pub base: f32,
+    pub span: f32,
+    pub falloff: f32,
+}
+
+impl Default for Swirl {
+    fn default() -> Self {
+        Self {
+            base: 0.6,
+            span: 4.4,
+            falloff: 0.6,
+        }
+    }
+}
 
 impl Effect for Swirl {
     fn name(&self) -> &str {
@@ -159,7 +230,14 @@ impl Effect for Swirl {
         // Scale the falloff with the region so the swirl fills whatever
         // window the hands make.
         let extent = ctx.region_extent().max(0.15);
-        [0.6 + 4.4 * k, extent * 0.6, 0.0, 0.0]
+        [self.base + self.span * k, extent * self.falloff, 0.0, 0.0]
+    }
+    fn tunables(&mut self) -> Vec<Tunable<'_>> {
+        vec![
+            Tunable::new("twist @ knob 0", &mut self.base, 0.0, 6.0),
+            Tunable::new("extra twist @ knob 1", &mut self.span, 0.0, 12.0),
+            Tunable::new("falloff x region", &mut self.falloff, 0.1, 2.0),
+        ]
     }
 }
 
@@ -168,9 +246,9 @@ pub fn registry() -> Vec<Box<dyn Effect>> {
     vec![
         Box::new(Pixelate::default()),
         Box::new(Blur::default()),
-        Box::new(RgbShift),
-        Box::new(EdgeGlow),
-        Box::new(Swirl),
+        Box::new(RgbShift::default()),
+        Box::new(EdgeGlow::default()),
+        Box::new(Swirl::default()),
     ]
 }
 
