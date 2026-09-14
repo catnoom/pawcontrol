@@ -68,6 +68,30 @@ impl Roi {
         u * scaled.x + v * scaled.y
     }
 
+    /// Sample this ROI into a `size x size` **NCHW** RGB tensor in 0..1.
+    ///
+    /// The face models take channels-first input, unlike the hand models, so
+    /// the same crop has to be written plane by plane.
+    pub fn sample_into_planar(&self, frame: &Frame, size: usize, out: &mut Vec<f32>) {
+        out.clear();
+        out.resize(size * size * 3, 0.0);
+        let plane = size * size;
+        let (u, v) = self.axes();
+        let step = self.side / size as f32;
+        let origin = self.center - (u + v) * (self.side * 0.5) + (u + v) * (step * 0.5);
+
+        for y in 0..size {
+            let row = origin + v * (y as f32 * step);
+            for x in 0..size {
+                let c = frame.sample(row + u * (x as f32 * step));
+                let i = y * size + x;
+                out[i] = c[0];
+                out[plane + i] = c[1];
+                out[2 * plane + i] = c[2];
+            }
+        }
+    }
+
     /// Sample this ROI into a `size x size` NHWC RGB tensor in 0..1.
     pub fn sample_into(&self, frame: &Frame, size: usize, out: &mut Vec<f32>) {
         out.clear();

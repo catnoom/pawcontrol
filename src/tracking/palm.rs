@@ -4,6 +4,7 @@
 //! `[1, 2016, 18]` box regressions and `[1, 2016, 1]` score logits, which we
 //! decode against locally generated anchors and then NMS.
 
+use super::nms::Detection;
 use glam::Vec2;
 
 /// Square input resolution the palm model expects.
@@ -31,6 +32,18 @@ pub struct PalmDetection {
     pub center: Vec2,
     pub size: Vec2,
     pub keypoints: [Vec2; NUM_KEYPOINTS],
+}
+
+impl Detection for PalmDetection {
+    fn score(&self) -> f32 {
+        self.score
+    }
+    fn center(&self) -> Vec2 {
+        self.center
+    }
+    fn size(&self) -> Vec2 {
+        self.size
+    }
 }
 
 impl PalmDetection {
@@ -95,27 +108,39 @@ fn sigmoid(x: f32) -> f32 {
 pub struct Letterbox {
     pub scale: f32,
     pub pad: Vec2,
+    /// Side of the square being fitted into, in model pixels.
+    pub size: f32,
 }
 
 impl Letterbox {
     /// Fit a `w x h` frame into a square of `INPUT_SIZE`, preserving aspect.
     pub fn fit(w: usize, h: usize) -> Self {
-        let scale = INPUT_SIZE as f32 / w.max(h) as f32;
+        Self::fit_to(w, h, INPUT_SIZE)
+    }
+
+    /// Fit into a square of `size`. The face detector uses a different input
+    /// resolution, so the target cannot be baked in.
+    pub fn fit_to(w: usize, h: usize, size: usize) -> Self {
+        let scale = size as f32 / w.max(h) as f32;
         let pad = Vec2::new(
-            (INPUT_SIZE as f32 - w as f32 * scale) * 0.5,
-            (INPUT_SIZE as f32 - h as f32 * scale) * 0.5,
+            (size as f32 - w as f32 * scale) * 0.5,
+            (size as f32 - h as f32 * scale) * 0.5,
         );
-        Self { scale, pad }
+        Self {
+            scale,
+            pad,
+            size: size as f32,
+        }
     }
 
     /// Model space (0..1 of the padded square) -> source pixels.
     pub fn to_pixels(&self, p: Vec2) -> Vec2 {
-        (p * INPUT_SIZE as f32 - self.pad) / self.scale
+        (p * self.size - self.pad) / self.scale
     }
 
     /// Lengths carry the scale but not the padding offset.
     pub fn len_to_pixels(&self, v: Vec2) -> Vec2 {
-        v * INPUT_SIZE as f32 / self.scale
+        v * self.size / self.scale
     }
 }
 
@@ -160,35 +185,6 @@ pub fn decode(
     out
 }
 
-fn iou(a: &PalmDetection, b: &PalmDetection) -> f32 {
-    let (a0, a1) = (a.center - a.size * 0.5, a.center + a.size * 0.5);
-    let (b0, b1) = (b.center - b.size * 0.5, b.center + b.size * 0.5);
-    let lo = a0.max(b0);
-    let hi = a1.min(b1);
-    let inter = (hi - lo).max(Vec2::ZERO);
-    let inter_area = inter.x * inter.y;
-    let union = a.size.x * a.size.y + b.size.x * b.size.y - inter_area;
-    if union <= 0.0 {
-        0.0
-    } else {
-        inter_area / union
-    }
-}
-
-/// Greedy non-maximum suppression, highest score first.
-pub fn nms(mut dets: Vec<PalmDetection>, iou_threshold: f32, max_out: usize) -> Vec<PalmDetection> {
-    dets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    let mut kept: Vec<PalmDetection> = Vec::new();
-    for d in dets {
-        if kept.len() >= max_out {
-            break;
-        }
-        if kept.iter().all(|k| iou(k, &d) < iou_threshold) {
-            kept.push(d);
-        }
-    }
-    kept
-}
 
 #[cfg(test)]
 mod tests {
@@ -217,7 +213,7 @@ mod tests {
             keypoints: [Vec2::ZERO; NUM_KEYPOINTS],
         };
         // Two nearly-identical boxes plus one far away.
-        let out = nms(vec![mk(0.9, 0.0), mk(0.8, 1.0), mk(0.7, 100.0)], 0.3, 4);
+        let out = super::super::nms::nms(vec![mk(0.9, 0.0), mk(0.8, 1.0), mk(0.7, 100.0)], 0.3, 4);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].score, 0.9);
     }

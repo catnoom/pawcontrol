@@ -5,9 +5,11 @@
 //! So we run stage 1 only when we are short of hands, and otherwise re-derive
 //! each crop from the previous frame's landmarks.
 
+pub mod face;
 pub mod filter;
 pub mod hand;
 pub mod landmark;
+pub mod nms;
 pub mod palm;
 pub mod roi;
 
@@ -189,7 +191,7 @@ impl HandTracker {
         let (_, scores) = outputs["Identity_1"].try_extract_tensor::<f32>()?;
 
         let dets = palm::decode(boxes, scores, &self.anchors, lb, settings.palm_score_threshold);
-        let dets = palm::nms(dets, PALM_NMS_IOU, settings.max_hands);
+        let dets = nms::nms(dets, PALM_NMS_IOU, settings.max_hands);
 
         for det in dets {
             if self.tracks.len() >= settings.max_hands {

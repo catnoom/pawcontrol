@@ -1,5 +1,6 @@
 //! Runtime-tunable settings, shared between the control panel and the pipeline.
 
+use crate::tracking::face::FaceSettings;
 use crate::tracking::filter::OneEuroConfig;
 use std::sync::{Arc, Mutex};
 
@@ -38,6 +39,7 @@ pub struct TrackingSettings {
     /// Frames between palm-detection attempts while short of hands.
     pub redetect_interval: u64,
     pub filter: OneEuroConfig,
+    pub face: FaceSettings,
 }
 
 impl Default for TrackingSettings {
@@ -48,6 +50,7 @@ impl Default for TrackingSettings {
             palm_score_threshold: 0.5,
             redetect_interval: 4,
             filter: OneEuroConfig::default(),
+            face: FaceSettings::default(),
         }
     }
 }

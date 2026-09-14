@@ -17,12 +17,16 @@ use crate::region::{self, RegionSource, TwoHandQuad};
 use crate::render::overlay::LineInstance;
 use crate::render::{RenderInput, Renderer};
 use crate::settings::{self, Shared, TrackingSettings};
-use crate::ui::{PanelState, Stats, Ui};
+use crate::ui::{EyeState, PanelState, Stats, Ui};
+use crate::tracking::face::eye::{self, BlinkConfig, BlinkDetector, Eye};
+use crate::tracking::face::{FaceFrame, FaceTracker};
 use crate::tracking::hand::{Finger, HandFrame, BONES};
 use crate::tracking::{HandTracker, TrackerConfig};
 
 /// Shared latest tracking result.
 type HandSlot = Arc<Mutex<Arc<HandFrame>>>;
+/// Shared latest face result.
+type FaceSlot = Arc<Mutex<Arc<FaceFrame>>>;
 
 pub struct AppOptions {
     pub camera: Option<u32>,
@@ -34,6 +38,7 @@ pub struct App {
 
     bus: Arc<FrameBus>,
     hands: HandSlot,
+    faces: FaceSlot,
     camera: CameraHandle,
     /// Size the window was created at; the live size comes from the frames.
     camera_size: (u32, u32),
@@ -52,6 +57,13 @@ pub struct App {
     knob_manual: bool,
     /// Whether the zone is held in place.
     freeze: bool,
+    /// Long-blink trigger for freezing, on the user's right eye.
+    blink: BlinkDetector,
+    blink_cfg: BlinkConfig,
+    /// Which eye the long-blink trigger watches.
+    trigger_eye: Eye,
+    /// Most recent eye-aspect-ratio reading, for the panel.
+    last_ear: Option<f32>,
     /// The region latched when freezing began.
     latched_region: Option<crate::region::Region>,
     tracking: Shared<TrackingSettings>,
@@ -79,8 +91,14 @@ impl App {
         let camera_size = camera.state().current;
 
         let hands: HandSlot = Arc::new(Mutex::new(Arc::new(HandFrame::default())));
+        let faces: FaceSlot = Arc::new(Mutex::new(Arc::new(FaceFrame::default())));
         let tracking = settings::shared(TrackingSettings::default());
-        spawn_tracking(bus.clone(), hands.clone(), tracking.clone());
+        spawn_tracking(
+            bus.clone(),
+            hands.clone(),
+            faces.clone(),
+            tracking.clone(),
+        );
 
         let effects = effect::registry();
         let region_source: Box<dyn RegionSource> = Box::new(TwoHandQuad::default());
@@ -96,6 +114,7 @@ impl App {
             renderer: None,
             bus,
             hands,
+            faces,
             camera,
             camera_size,
             effects,
@@ -112,6 +131,10 @@ impl App {
             outline_width: 1.2,
             knob_manual: false,
             freeze: false,
+            blink: BlinkDetector::default(),
+            blink_cfg: BlinkConfig::default(),
+            trigger_eye: Eye::Right,
+            last_ear: None,
             latched_region: None,
             tracking,
             ui: None,
@@ -207,6 +230,21 @@ impl App {
             }
         }
 
+        // A long blink of the user's right eye toggles the freeze. Reading the
+        // eye from the *unmirrored* mesh keeps "right" meaning the user's own
+        // right regardless of how the preview is flipped.
+        let faces = self.faces.lock().unwrap().clone();
+        self.last_ear = faces
+            .first()
+            .and_then(|f| eye::aspect_ratio(&f.landmarks, self.trigger_eye));
+        if self.blink.update(self.last_ear, dt, &self.blink_cfg).is_some() {
+            self.freeze = !self.freeze;
+            log::info!(
+                "long blink -> zone {}",
+                if self.freeze { "frozen" } else { "live" }
+            );
+        }
+
         let live_region = self.region_source.region(&hands);
         let region = region::resolve(live_region, &mut self.latched_region, self.freeze);
         let time = self.start.elapsed().as_secs_f32();
@@ -259,6 +297,13 @@ impl App {
                         knob: &mut self.knob,
                         knob_manual: &mut self.knob_manual,
                         freeze: &mut self.freeze,
+                        blink_cfg: &mut self.blink_cfg,
+                        trigger_eye: &mut self.trigger_eye,
+                        eye_state: EyeState {
+                            ear: self.last_ear,
+                            closed_for: self.blink.closed_for(),
+                            face_score: faces.first().map(|f| f.score),
+                        },
                         mirror: &mut self.mirror,
                         show_skeleton: &mut self.show_skeleton,
                         show_outline: &mut self.show_outline,
@@ -300,28 +345,46 @@ impl App {
         if self.fps_counter.1.elapsed().as_secs_f32() >= 2.0 {
             let fps = self.fps_counter.0 as f32 / self.fps_counter.1.elapsed().as_secs_f32();
             log::info!(
-                "{fps:.0} fps | effect: {} | hands: {} | region: {} | knob: {:.2}",
+                "{fps:.0} fps | effect: {} | hands: {} | region: {} | knob: {:.2} | eye: {}",
                 self.effects[self.effect_index].name(),
                 hands.hands.len(),
                 if region.is_active() { "on" } else { "off" },
-                self.knob
+                self.knob,
+                match self.last_ear {
+                    Some(ear) => format!("{ear:.3}"),
+                    None => "no face".to_string(),
+                }
             );
             self.fps_counter = (0, Instant::now());
         }
     }
 }
 
-fn spawn_tracking(bus: Arc<FrameBus>, out: HandSlot, settings: Shared<TrackingSettings>) {
+fn spawn_tracking(
+    bus: Arc<FrameBus>,
+    out: HandSlot,
+    faces_out: FaceSlot,
+    settings: Shared<TrackingSettings>,
+) {
     std::thread::Builder::new()
         .name("tracking".into())
         .spawn(move || {
-            let mut tracker = match HandTracker::new(TrackerConfig::default(), settings) {
+            let mut tracker = match HandTracker::new(TrackerConfig::default(), settings.clone()) {
                 Ok(t) => t,
                 Err(e) => {
                     log::error!("hand tracking unavailable: {e:#}");
                     return;
                 }
             };
+            // A missing face model must not take hand tracking down with it.
+            let mut faces = match FaceTracker::new(true) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    log::error!("face tracking unavailable: {e:#}");
+                    None
+                }
+            };
+
             let mut last_seq = 0;
             let mut last = Instant::now();
             loop {
@@ -343,6 +406,16 @@ fn spawn_tracking(bus: Arc<FrameBus>, out: HandSlot, settings: Shared<TrackingSe
                 match tracker.track(&frame, dt) {
                     Ok(result) => *out.lock().unwrap() = Arc::new(result),
                     Err(e) => log::warn!("tracking step failed: {e:#}"),
+                }
+
+                // Faces share this thread: the two stages together cost only a
+                // few milliseconds, well inside the camera's frame budget.
+                if let Some(face_tracker) = faces.as_mut() {
+                    let face_settings = settings.lock().unwrap().face;
+                    match face_tracker.track(&frame, &face_settings) {
+                        Ok(result) => *faces_out.lock().unwrap() = Arc::new(result),
+                        Err(e) => log::warn!("face tracking step failed: {e:#}"),
+                    }
                 }
             }
         })

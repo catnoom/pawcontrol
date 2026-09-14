@@ -12,12 +12,23 @@ use crate::camera::CameraHandle;
 use crate::effect::Effect;
 use crate::gesture::GestureEngine;
 use crate::settings::{Shared, TrackingSettings};
+use crate::tracking::face::eye::{BlinkConfig, Eye};
 
 /// Tessellated panel geometry, handed to the renderer.
 pub struct UiOutput {
     pub primitives: Vec<egui::ClippedPrimitive>,
     pub textures_delta: egui::TexturesDelta,
     pub pixels_per_point: f32,
+}
+
+/// Live eye readings, shown so the blink thresholds can be tuned by eye.
+pub struct EyeState {
+    /// Eye aspect ratio of the user's right eye, if a face is tracked.
+    pub ear: Option<f32>,
+    /// How long it has been shut, in seconds.
+    pub closed_for: f32,
+    /// Landmark-model confidence for the tracked face.
+    pub face_score: Option<f32>,
 }
 
 /// Read-only figures shown at the top of the panel.
@@ -36,6 +47,9 @@ pub struct PanelState<'a> {
     pub knob: &'a mut f32,
     pub knob_manual: &'a mut bool,
     pub freeze: &'a mut bool,
+    pub blink_cfg: &'a mut BlinkConfig,
+    pub trigger_eye: &'a mut Eye,
+    pub eye_state: EyeState,
     pub mirror: &'a mut bool,
     pub show_skeleton: &'a mut bool,
     pub show_outline: &'a mut bool,
@@ -129,6 +143,8 @@ fn draw_panel(ctx: &Context, panel: &mut PanelState<'_>) {
             ui.separator();
             camera_section(ui, panel);
             ui.separator();
+            eye_section(ui, panel);
+            ui.separator();
             tracking_section(ui, panel);
 
             ui.separator();
@@ -192,6 +208,70 @@ fn gesture_section(ui: &mut egui::Ui, panel: &mut PanelState<'_>) {
             ui.add(egui::Slider::new(t.value, t.min..=t.max).text(t.label));
         }
     }
+}
+
+fn eye_section(ui: &mut egui::Ui, panel: &mut PanelState<'_>) {
+    ui.heading("eyes");
+
+    let mut tracking = panel.tracking.lock().ok();
+    if let Some(t) = tracking.as_mut() {
+        ui.checkbox(&mut t.face.enabled, "track face");
+    }
+
+    // A live readout makes the thresholds tunable by watching your own eye
+    // rather than guessing at numbers.
+    egui::ComboBox::from_label("trigger eye")
+        .selected_text(match panel.trigger_eye {
+            Eye::Right => "right",
+            Eye::Left => "left",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(panel.trigger_eye, Eye::Right, "right");
+            ui.selectable_value(panel.trigger_eye, Eye::Left, "left");
+        });
+
+    match panel.eye_state.ear {
+        Some(ear) => {
+            let shut = ear < panel.blink_cfg.close_below;
+            ui.horizontal(|ui| {
+                ui.label(format!("right eye {ear:.3}"));
+                ui.label(
+                    egui::RichText::new(if shut { "shut" } else { "open" })
+                        .color(if shut {
+                            egui::Color32::from_rgb(230, 170, 90)
+                        } else {
+                            egui::Color32::from_rgb(130, 200, 140)
+                        }),
+                );
+            });
+            let progress =
+                (panel.eye_state.closed_for / panel.blink_cfg.hold_secs.max(1e-3)).clamp(0.0, 1.0);
+            ui.add(egui::ProgressBar::new(progress).desired_height(6.0));
+            if let Some(score) = panel.eye_state.face_score {
+                ui.label(
+                    egui::RichText::new(format!("face confidence {score:.2}"))
+                        .small()
+                        .weak(),
+                );
+            }
+        }
+        None => {
+            ui.label(egui::RichText::new("no face tracked").small().weak());
+        }
+    }
+
+    ui.add(
+        egui::Slider::new(&mut panel.blink_cfg.close_below, 0.05..=0.35).text("counts as shut"),
+    );
+    ui.add(
+        egui::Slider::new(&mut panel.blink_cfg.open_above, 0.05..=0.50).text("counts as open"),
+    );
+    ui.add(egui::Slider::new(&mut panel.blink_cfg.hold_secs, 0.2..=2.5).text("hold (s)"));
+    ui.label(
+        egui::RichText::new("a long blink of that eye freezes the zone")
+            .small()
+            .weak(),
+    );
 }
 
 fn camera_section(ui: &mut egui::Ui, panel: &mut PanelState<'_>) {

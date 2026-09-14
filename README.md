@@ -38,6 +38,7 @@ hand landmarks:    2.4 ms
 | thumb + pinky | next effect |
 | curl middle finger | intensity, 0 extended -> 1 fully curled (needs the window up) |
 | `space` | next effect (keyboard fallback) |
+| long right-eye blink | freeze / unfreeze the zone |
 | `f` | freeze the zone in place (hands can then move away) |
 | `h` | show/hide the control panel |
 | `d` | toggle the debug skeleton |
@@ -98,6 +99,26 @@ Each frame flows through four independent stages:
 | gesture | `src/gesture/` | landmarks → discrete events |
 | region | `src/region/` | landmarks → a masked shape |
 | effect | `src/effect/` | shape → what to draw inside it |
+
+### Face tracking
+
+A second two-stage pair runs alongside the hands, on the same thread: a
+256x256 BlazeFace detector and a 192x192 mesh model emitting 468 landmarks.
+These are **NCHW**, unlike the hand models, so crops are written plane by plane.
+
+Eye openness is the eye aspect ratio (EAR) — the eyelid gap over the eye's
+width. Dividing by the width makes it scale-free, so it reads the same near or
+far from the camera; a raw pixel gap would not. Open eyes measure about 0.3,
+closed under 0.15.
+
+The blink trigger uses hysteresis (separate shut/open thresholds) so an eye
+hovering at the boundary does not chatter, and a hold duration well above an
+involuntary blink (~0.1-0.4s). Losing the face *resets* the timer rather than
+counting as a closure, so tracking dropouts cannot be mistaken for a
+deliberate blink.
+
+Note that "right eye" follows MediaPipe's convention — the user's own right,
+which appears on the left of an unmirrored image.
 
 ### Hand tracking
 
@@ -164,15 +185,16 @@ resolve.
 cargo test
 ```
 
-41 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
-gesture hysteresis, region convexity and the knob's curl calibration. Two tests run against a real GPU device — one compiles every effect
+55 tests covering the ROI geometry, anchor decoding, NMS, the smoothing filter,
+gesture hysteresis, region convexity, the knob's curl calibration, and eye
+aspect ratio and blink timing. Two tests run against a real GPU device — one compiles every effect
 shader, the other drives the egui paint path — so rendering errors surface here
 rather than when the window opens. Two further tests run the full detection → crop → landmark chain against
 a real photograph, including a sweep over hand orientations; they are skipped
 unless you point them at an image:
 
 ```sh
-PAWCONTROL_TEST_IMAGE=/path/to/hand.jpg cargo test
+PAWCONTROL_TEST_IMAGE=/path/to/hand.jpg PAWCONTROL_FACE_IMAGE=/path/to/face.jpg cargo test
 ```
 
 ## Requirements

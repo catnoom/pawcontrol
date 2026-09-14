@@ -115,6 +115,7 @@ fn print_usage() {
          CONTROLS:\n\
          \x20 thumb + pinky    cycle effect (or press space)\n\
          \x20 curl middle      dial intensity (only while the window is up)\n\
+         \x20 long eye blink   freeze / unfreeze the zone\n\
          \x20 f                freeze / unfreeze the zone\n\
          \x20 h                show/hide the control panel\n\
          \x20 d / o / m        toggle skeleton / outline / mirror\n\
