@@ -32,6 +32,31 @@ pub struct Globals {
     pub flags: [f32; 4],
 }
 
+/// Apply egui's pending texture uploads, returning the ids to free after the
+/// draw.
+///
+/// Consuming the delta is mandatory, not tidiness: `TexturesDelta` asserts on
+/// drop that it holds no unapplied work, so leaving one dirty panics the
+/// process on the very first frame.
+fn consume_egui_textures(
+    egui: &mut egui_wgpu::Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    ui: &mut UiOutput,
+) -> Vec<egui::TextureId> {
+    // Each id can carry several partial updates in one frame.
+    for (id, deltas) in &ui.textures_delta.set {
+        for delta in deltas {
+            egui.update_texture(device, queue, *id, delta);
+        }
+    }
+    // Freeing is deferred until after the draw, since this frame's primitives
+    // may still reference these textures.
+    let free = ui.textures_delta.free.iter().copied().collect();
+    ui.textures_delta.clear();
+    free
+}
+
 /// What the renderer needs to draw one frame.
 pub struct RenderInput<'a> {
     pub frame: Option<&'a Frame>,
@@ -291,7 +316,7 @@ impl Renderer {
         self.last_uploaded = frame.seq;
     }
 
-    pub fn render(&mut self, input: RenderInput<'_>) -> Result<()> {
+    pub fn render(&mut self, mut input: RenderInput<'_>) -> Result<()> {
         if std::mem::take(&mut self.needs_reconfigure) {
             self.surface.configure(&self.device, &self.config);
         }
@@ -327,6 +352,16 @@ impl Renderer {
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         self.overlay.upload(&self.queue, &self.device, input.lines);
 
+        // Consume egui's texture delta before acquiring the swapchain image.
+        // `TexturesDelta` asserts on drop that it holds no unapplied work, and
+        // every acquire path below can bail out early — applying it here is
+        // what stops a skipped frame taking the process down with it.
+        let mut egui_free: Vec<egui::TextureId> = Vec::new();
+        if let Some(ui) = input.ui.as_mut() {
+            egui_free =
+                consume_egui_textures(&mut self.egui, &self.device, &self.queue, ui);
+        }
+
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             // Suboptimal still gives us a usable texture; reconfigure so the
@@ -359,12 +394,6 @@ impl Renderer {
             pixels_per_point: input.ui.as_ref().map_or(1.0, |u| u.pixels_per_point),
         };
         if let Some(ui) = &input.ui {
-            // Each id can carry several partial updates in one frame.
-            for (id, deltas) in &ui.textures_delta.set {
-                for delta in deltas {
-                    self.egui.update_texture(&self.device, &self.queue, *id, delta);
-                }
-            }
             self.egui.update_buffers(
                 &self.device,
                 &self.queue,
@@ -408,10 +437,8 @@ impl Renderer {
             }
         }
 
-        if let Some(ui) = &input.ui {
-            for id in &ui.textures_delta.free {
-                self.egui.free_texture(id);
-            }
+        for id in &egui_free {
+            self.egui.free_texture(id);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -589,9 +616,24 @@ mod tests {
                 ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("knob"));
             });
         };
-        ctx.run_ui(input(), build).textures_delta.clear();
-        let output = ctx.run_ui(input(), build);
-        let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+        // Two passes are needed: the first uploads the font atlas (non-empty
+        // texture delta) but a window only measures itself, so geometry does
+        // not appear until the second. Merge the deltas so the frame under
+        // test has both a dirty delta and something to draw — a later frame
+        // alone has an empty delta, which would make this vacuous.
+        let first = ctx.run_ui(input(), build);
+        let second = ctx.run_ui(input(), build);
+        let mut textures_delta = first.textures_delta;
+        textures_delta.append(second.textures_delta);
+        let mut ui_output = crate::ui::UiOutput {
+            primitives: ctx.tessellate(second.shapes, second.pixels_per_point),
+            textures_delta,
+            pixels_per_point: second.pixels_per_point,
+        };
+        assert!(
+            !ui_output.textures_delta.is_empty(),
+            "expected a non-empty delta to exercise; the test would be vacuous"
+        );
 
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("target"),
@@ -610,18 +652,30 @@ mod tests {
         let view = target.create_view(&Default::default());
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [256, 256],
-            pixels_per_point: output.pixels_per_point,
+            pixels_per_point: ui_output.pixels_per_point,
         };
 
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut encoder = device.create_command_encoder(&Default::default());
-        for (id, deltas) in &output.textures_delta.set {
-            for delta in deltas {
-                egui_renderer.update_texture(&device, &queue, *id, delta);
-            }
-        }
-        assert!(!primitives.is_empty(), "egui produced no geometry to draw");
-        egui_renderer.update_buffers(&device, &queue, &mut encoder, &primitives, &screen);
+
+        // The same helper `render()` uses, so the delta contract is covered by
+        // the real code path rather than a copy of it.
+        let to_free = consume_egui_textures(&mut egui_renderer, &device, &queue, &mut ui_output);
+        assert!(
+            ui_output.textures_delta.is_empty(),
+            "delta left dirty; it will panic when dropped"
+        );
+        assert!(
+            !ui_output.primitives.is_empty(),
+            "egui produced no geometry to draw"
+        );
+        egui_renderer.update_buffers(
+            &device,
+            &queue,
+            &mut encoder,
+            &ui_output.primitives,
+            &screen,
+        );
         {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui"),
@@ -640,11 +694,16 @@ mod tests {
                 multiview_mask: None,
             });
             let mut pass = pass.forget_lifetime();
-            egui_renderer.render(&mut pass, &primitives, &screen);
+            egui_renderer.render(&mut pass, &ui_output.primitives, &screen);
         }
         queue.submit(Some(encoder.finish()));
+        for id in &to_free {
+            egui_renderer.free_texture(id);
+        }
         if let Some(err) = pollster::block_on(scope.pop()) {
             panic!("egui paint path produced a validation error:\n{err}");
         }
+        // Dropping `ui_output` here must not panic: that is the bug this
+        // guards, and it only shows up with a non-empty delta.
     }
 }
